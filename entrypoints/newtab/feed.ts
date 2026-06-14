@@ -1,4 +1,4 @@
-// Data layer for the "Try next" feed — the only part of marktab that makes
+// Data layer for the "Pins" feed — the only part of marktab that makes
 // network requests, and only to the host the user configures. Kept free of
 // `browser`/DOM globals (except the storage/permission helpers) so the adapter
 // is unit-testable under a plain Node Vitest run with an injected fetch.
@@ -87,7 +87,7 @@ export function createFeedClient(config: FeedConfig, fetchImpl: typeof fetch = f
     async fetchQueue(query) {
       const res = await fetchImpl(buildQueueUrl(base, query), { headers });
       if (!res.ok) throw new Error(`Feed fetch failed: ${res.status}`);
-      // Items are shape-validated at render (safeHttpUrl in TryNext), not here.
+      // Items are shape-validated at render (safeHttpUrl in Pins), not here.
       const data = (await res.json()) as { items?: QueueItem[] };
       return data.items ?? [];
     },

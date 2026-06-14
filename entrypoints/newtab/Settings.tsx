@@ -200,10 +200,10 @@ export default function Settings({ onSaved }: SettingsProps) {
             aria-labelledby="settings-title"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="settings-title" className="settings-title">Try next source</h2>
+            <h2 id="settings-title" className="settings-title">Pins source</h2>
             <p className="settings-help">
               Point this at a server that implements the marktab queue API (see the README). Leave it
-              blank to hide the Try next row.
+              blank to hide the Pins row.
             </p>
 
             <label className="settings-field">

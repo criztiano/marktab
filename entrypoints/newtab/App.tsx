@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import TryNext from './TryNext';
+import Pins from './Pins';
 import Settings from './Settings';
 
 // Minimal local type — avoids depending on polyfill type exports.
@@ -60,7 +60,7 @@ function flatten(nodes: BookmarkNode[]): Section[] {
 export default function App() {
   const [sections, setSections] = useState<Section[]>([]);
   const [query, setQuery] = useState('');
-  const [reloadKey, setReloadKey] = useState(0); // bump to re-fetch Try-next after a config save
+  const [reloadKey, setReloadKey] = useState(0); // bump to re-fetch Pins after a config save
   const inputRef = useRef<HTMLInputElement>(null);
   const columnsRef = useRef<HTMLDivElement>(null);
 
@@ -155,7 +155,7 @@ export default function App() {
           {q && `${matches} ${matches === 1 ? 'match' : 'matches'}`}
         </p>
       </div>
-      {!q && <TryNext key={reloadKey} />}
+      {!q && <Pins key={reloadKey} />}
       {filtered.length === 0 && (
         <p className="empty">{total === 0 ? 'No bookmarks yet.' : 'Nothing matches.'}</p>
       )}
