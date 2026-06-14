@@ -10,9 +10,9 @@ export default defineConfig({
     permissions: [
       'bookmarks', // read the bookmark tree
       'favicon', // use Chrome's local favicon cache (no external requests)
-      'storage', // persist the Try-next feed base URL + token (see entrypoints/newtab/feed.ts)
+      'storage', // persist the Pins feed base URL + token (see entrypoints/newtab/feed.ts)
     ],
-    // The "Try next" feed talks to whatever host the user configures. Access is
+    // The "Pins" feed talks to whatever host the user configures. Access is
     // optional and granted per-host at runtime (Settings → Save), so a fresh
     // install requests nothing and no host is baked into the extension. https for
     // real hosts; plain http only for localhost (dev).
