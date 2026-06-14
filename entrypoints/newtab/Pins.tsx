@@ -10,7 +10,7 @@ import {
   type QueueItem,
 } from './feed';
 
-/** Load the "Try next" feed on mount, stale-while-revalidate: show cached items
+/** Load the "Pins" feed on mount, stale-while-revalidate: show cached items
  *  immediately (no skeleton), then refresh in the background. The section is
  *  supplementary, so any failure just keeps what we have (or stays collapsed). */
 function useFeedQueue() {
@@ -72,7 +72,7 @@ function useFeedQueue() {
   return { items, dismiss, markOpened };
 }
 
-export default function TryNext() {
+export default function Pins() {
   const { items, dismiss, markOpened } = useFeedQueue();
 
   // Drop items whose URL isn't plain http(s) — they're remote-controlled and a
@@ -83,28 +83,28 @@ export default function TryNext() {
   // The section stays mounted (at zero height when empty) so the height can
   // animate smoothly when cards first arrive — no layout jump.
   return (
-    <section className="trynext" aria-label="Try next" aria-hidden={!hasCards} data-open={hasCards}>
-      <div className="trynext-anim">
-        <div className="trynext-clip">
+    <section className="pins" aria-label="Pins" aria-hidden={!hasCards} data-open={hasCards}>
+      <div className="pins-anim">
+        <div className="pins-clip">
           {hasCards && (
             <>
-              <h2 className="trynext-title">Try next</h2>
-              <ul className="trynext-row">
+              <h2 className="pins-title">Pins</h2>
+              <ul className="pins-row">
                 {safe.map((item, i) => {
                   const image = safeHttpUrl(item.image_url);
                   // reason: CSS custom property (--i) isn't part of CSSProperties
                   const style = { '--i': i } as CSSProperties;
                   return (
-                    <li key={item.id} className="trynext-card" style={style}>
+                    <li key={item.id} className="pins-card" style={style}>
                       <a
-                        className="trynext-link"
+                        className="pins-link"
                         href={item.url}
                         title={`${item.title}\n${item.url}`}
                         onClick={() => markOpened(item.id)}
                       >
                         {image && (
                           <img
-                            className="trynext-img"
+                            className="pins-img"
                             src={image}
                             alt=""
                             loading="lazy"
@@ -113,14 +113,14 @@ export default function TryNext() {
                             }}
                           />
                         )}
-                        <span className="trynext-card-title">{item.title}</span>
+                        <span className="pins-card-title">{item.title}</span>
                         {(item.description || item.author) && (
-                          <span className="trynext-meta">{item.description || item.author}</span>
+                          <span className="pins-meta">{item.description || item.author}</span>
                         )}
                       </a>
                       <button
                         type="button"
-                        className="trynext-dismiss"
+                        className="pins-dismiss"
                         aria-label={`Dismiss ${item.title}`}
                         onClick={() => dismiss(item.id)}
                       >
