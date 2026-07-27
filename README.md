@@ -31,7 +31,7 @@ For a private unpacked build with Pins preconfigured, create `~/.config/marktab/
 { "baseUrl": "https://pins.example", "apiKey": "your-private-key" }
 ```
 
-Then run `npm run build:local`. It builds the same generic source, patches only the generated manifest's required host permission, and writes a generated `marktab-local.json` into `.output/chrome-mv3/`. That output contains the key: keep it private, never commit or publish it. The regular `npm run build` remains credential-free and uses optional per-host permissions.
+Then run `npm run build:local`. It builds the same generic extension and writes only a generated `marktab-local.json` into `.output/chrome-mv3/`; it does **not** add required `host_permissions`. Both generic and local manifests retain only the optional per-host permission patterns. On the first new or upgraded local launch, click **Enable Pins** in the Pins row and approve Chrome's one-time grant for the configured host; Pins loads immediately without a page reload. The generated config contains the key: keep the output private and never commit or publish it.
 
 ### Other commands
 
@@ -56,6 +56,8 @@ npm run compile         # typecheck only
 "Pins" is an **optional** top row of cards you want to read/try later, served by *your own* backend. It ships **dormant** — the extension requests no network access at install and the row doesn't appear until you configure a server. It's the only part of marktab that ever touches the network, and only the host you set.
 
 **Configure it** with the **gear button** (top-right): enter your server's base URL (+ an optional API token) and hit **Save & test**. The browser asks once to allow access to that host; then marktab saves the values and verifies the connection inline. An `https` URL is required when you set a token.
+
+A local build is already configured, so its first new tab instead shows a compact **Enable Pins** prompt. Clicking it asks Chrome for only that configured host, then loads cached and live cards in place. Cancelling leaves the prompt ready to try again and does not affect bookmark browsing.
 
 **Bring your own backend** — implement these three endpoints and point marktab at them:
 

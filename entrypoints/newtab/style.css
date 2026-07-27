@@ -283,6 +283,7 @@ mark {
   outline-offset: 1px;
 }
 
+.pins-onboarding,
 .pins-error {
   display: flex;
   align-items: center;
@@ -297,6 +298,7 @@ mark {
   margin-top: -36px;
 }
 
+.pins-onboarding button,
 .pins-error button {
   padding: 2px 8px;
   font: inherit;
@@ -307,11 +309,13 @@ mark {
   cursor: pointer;
 }
 
+.pins-onboarding button:disabled,
 .pins-error button:disabled {
   color: var(--muted);
   cursor: default;
 }
 
+.pins-onboarding button:focus-visible,
 .pins-error button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;

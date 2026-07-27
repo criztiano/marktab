@@ -1,5 +1,15 @@
-import { describe, expect, it } from 'vitest';
-import { normaliseLocalConfig, personaliseManifest } from './configure-unpacked.mjs';
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { configureUnpacked, normaliseLocalConfig } from './configure-unpacked.mjs';
+
+const temporaryDirectories = [];
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })));
+});
 
 describe('normaliseLocalConfig', () => {
   it('accepts apiKey or token without exposing either in the manifest', () => {
@@ -23,13 +33,39 @@ describe('normaliseLocalConfig', () => {
   });
 });
 
-describe('personaliseManifest', () => {
-  it('sets only the configured HTTPS origin as a required host permission', () => {
-    const manifest = personaliseManifest(
-      { manifest_version: 3, name: 'marktab', optional_host_permissions: ['https://*/*'] },
-      { baseUrl: 'https://pins.example/api', token: 'placeholder' },
-    );
-    expect(manifest.host_permissions).toEqual(['https://pins.example/*']);
-    expect(JSON.stringify(manifest)).not.toContain('placeholder');
+describe('configureUnpacked', () => {
+  it('writes a private bundled config without changing the generic manifest', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'marktab-configure-'));
+    temporaryDirectories.push(directory);
+    const outputDir = join(directory, 'output');
+    const configPath = join(directory, 'local.json');
+    const manifestPath = join(outputDir, 'manifest.json');
+    const manifest = `${JSON.stringify(
+      {
+        manifest_version: 3,
+        name: 'marktab',
+        optional_host_permissions: ['https://*/*', 'http://localhost/*'],
+      },
+      null,
+      2,
+    )}\n`;
+    await mkdir(outputDir);
+    await writeFile(configPath, JSON.stringify({ baseUrl: 'https://pins.example/api', apiKey: 'placeholder' }));
+    await writeFile(manifestPath, manifest);
+    await writeFile(join(outputDir, 'marktab-local.json'), 'stale', { mode: 0o644 });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await configureUnpacked({ configPath, outputDir });
+
+    expect(await readFile(manifestPath, 'utf8')).toBe(manifest);
+    expect(JSON.parse(await readFile(join(outputDir, 'marktab-local.json'), 'utf8'))).toEqual({
+      baseUrl: 'https://pins.example/api',
+      token: 'placeholder',
+    });
+    expect((await stat(join(outputDir, 'marktab-local.json'))).mode & 0o777).toBe(0o600);
+    const output = log.mock.calls.flat().join('\n');
+    expect(output).toContain('Preconfigured Pins');
+    expect(output).toContain('Enable Pins');
+    expect(output).not.toContain('placeholder');
   });
 });

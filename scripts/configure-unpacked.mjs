@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -29,27 +29,23 @@ export function normaliseLocalConfig(input) {
   return { baseUrl, token };
 }
 
-export function personaliseManifest(manifest, config) {
-  return { ...manifest, host_permissions: [permissionOrigin(config.baseUrl)] };
-}
-
 export async function configureUnpacked({
   configPath = resolve(homedir(), '.config/marktab/local.json'),
   outputDir = resolve(projectRoot, '.output/chrome-mv3'),
 } = {}) {
   const source = JSON.parse(await readFile(configPath, 'utf8'));
   const config = normaliseLocalConfig(source);
-  const manifestPath = resolve(outputDir, 'manifest.json');
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  const personalised = personaliseManifest(manifest, config);
 
-  await writeFile(manifestPath, `${JSON.stringify(personalised, null, 2)}\n`);
-  await writeFile(resolve(outputDir, 'marktab-local.json'), `${JSON.stringify(config, null, 2)}\n`, {
+  const bundledConfigPath = resolve(outputDir, 'marktab-local.json');
+  await writeFile(bundledConfigPath, `${JSON.stringify(config, null, 2)}\n`, {
     mode: 0o600,
   });
+  await chmod(bundledConfigPath, 0o600);
 
   // Safe operational output: origin and paths only, never the API key.
-  console.log(`Configured unpacked build for ${permissionOrigin(config.baseUrl)}`);
+  console.log(
+    `Preconfigured Pins for ${permissionOrigin(config.baseUrl)}; Chrome still requires one click on Enable Pins to grant access to that host.`,
+  );
   console.log(`Output: ${outputDir}`);
 }
 

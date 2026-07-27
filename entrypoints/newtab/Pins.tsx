@@ -1,87 +1,166 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import {
   createFeedClient,
   hasHostAccess,
   loadCachedItems,
   loadConfig,
+  requestHostAccess,
   safeHttpUrl,
   saveCachedItems,
   type FeedClient,
+  type FeedConfig,
   type QueueItem,
 } from './feed';
+
+export type PinsAvailability = 'unconfigured' | 'needs-access' | 'enabling' | 'ready';
 
 interface FeedQueueState {
   items: QueueItem[];
   failed: boolean;
   retrying: boolean;
+  availability: PinsAvailability;
   dismiss: (id: string) => void;
+  enable: () => void;
   markOpened: (id: string) => void;
   retry: () => void;
 }
 
-/** Stale-while-revalidate. Only a fetch failure from a configured, permitted
- * source becomes visible; dormant or unavailable sources remain collapsed. */
+/** Keep the permissions request as the first async operation reached by the
+ * button handler so Chrome can associate it with the user's click gesture. */
+export function requestPinsAccess(
+  baseUrl: string,
+  request: (url: string) => Promise<boolean> = requestHostAccess,
+): Promise<boolean> {
+  return request(baseUrl);
+}
+
+/** Stale-while-revalidate. Unconfigured sources remain collapsed; configured
+ * sources without access show a one-click permission onboarding state. */
 function useFeedQueue(): FeedQueueState {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [failed, setFailed] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [availability, setAvailability] = useState<PinsAvailability>('unconfigured');
   const clientRef = useRef<FeedClient | null>(null);
-  const retryRef = useRef<() => void>(() => {});
+  const configRef = useRef<FeedConfig | null>(null);
   const dismissedRef = useRef<Set<string>>(new Set());
   const hydratedRef = useRef(false);
+  const mountedRef = useRef(false);
   const retryingRef = useRef(false);
+  const enablingRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (hydratedRef.current) void saveCachedItems(items);
   }, [items]);
 
-  useEffect(() => {
-    let alive = true;
-    const keep = (list: QueueItem[]) => list.filter((item) => !dismissedRef.current.has(item.id));
+  const keep = useCallback(
+    (list: QueueItem[]) => list.filter((item) => !dismissedRef.current.has(item.id)),
+    [],
+  );
 
-    const refresh = async (isRetry: boolean) => {
+  const refresh = useCallback(
+    async (isRetry: boolean) => {
       const client = clientRef.current;
       if (!client || retryingRef.current) return;
       if (isRetry) {
         retryingRef.current = true;
-        if (alive) setRetrying(true);
+        if (mountedRef.current) setRetrying(true);
       }
       try {
         const fresh = await client.fetchQueue();
-        if (!alive) return;
+        if (!mountedRef.current) return;
         hydratedRef.current = true;
         setItems(keep(fresh));
         setFailed(false);
       } catch {
-        if (alive) setFailed(true); // keep cached cards visible
+        if (mountedRef.current) setFailed(true); // keep cached cards visible
       } finally {
         if (isRetry) {
           retryingRef.current = false;
-          if (alive) setRetrying(false);
+          if (mountedRef.current) setRetrying(false);
         }
       }
-    };
+    },
+    [keep],
+  );
 
-    retryRef.current = () => void refresh(true);
-    void (async () => {
-      const config = await loadConfig();
-      if (!alive || !config.baseUrl) return;
-      if (!(await hasHostAccess(config.baseUrl)) || !alive) return;
-
-      const cached = await loadCachedItems();
-      if (alive && cached.length) {
+  const activate = useCallback(
+    async (config: FeedConfig, showProgress: boolean) => {
+      setFailed(false);
+      let cached: QueueItem[] = [];
+      try {
+        cached = await loadCachedItems();
+      } catch {
+        // A damaged/missing cache must not block a live fetch after access is granted.
+      }
+      if (!mountedRef.current) return;
+      if (cached.length) {
         hydratedRef.current = true;
         setItems(keep(cached));
       }
       clientRef.current = createFeedClient(config);
+      if (!showProgress) setAvailability('ready');
       await refresh(false);
-    })();
+      if (showProgress && mountedRef.current) setAvailability('ready');
+      enablingRef.current = false;
+    },
+    [keep, refresh],
+  );
 
-    return () => {
-      alive = false;
-      retryRef.current = () => {};
-    };
-  }, []);
+  useEffect(() => {
+    void (async () => {
+      let config: FeedConfig;
+      try {
+        config = await loadConfig();
+      } catch {
+        return;
+      }
+      if (!mountedRef.current || !config.baseUrl) return;
+      configRef.current = config;
+      let permitted = false;
+      try {
+        permitted = await hasHostAccess(config.baseUrl);
+      } catch {
+        // Treat an unavailable permission check like a missing grant: keep the
+        // configured source visible and let the explicit click try again.
+      }
+      if (!permitted) {
+        if (mountedRef.current) setAvailability('needs-access');
+        return;
+      }
+      if (mountedRef.current) await activate(config, false);
+    })();
+  }, [activate]);
+
+  const enable = () => {
+    const config = configRef.current;
+    if (!config || enablingRef.current) return;
+    enablingRef.current = true;
+    // Call immediately from the click handler; do not put storage/cache work first.
+    const permission = requestPinsAccess(config.baseUrl);
+    setAvailability('enabling');
+    void permission
+      .then((granted) => {
+        if (!mountedRef.current) return;
+        if (!granted) {
+          enablingRef.current = false;
+          setAvailability('needs-access');
+          return;
+        }
+        void activate(config, true);
+      })
+      .catch(() => {
+        enablingRef.current = false;
+        if (mountedRef.current) setAvailability('needs-access');
+      });
+  };
 
   const dismiss = (id: string) => {
     dismissedRef.current.add(id);
@@ -97,9 +176,11 @@ function useFeedQueue(): FeedQueueState {
     items,
     failed,
     retrying,
+    availability,
     dismiss,
+    enable,
     markOpened,
-    retry: () => retryRef.current(),
+    retry: () => void refresh(true),
   };
 }
 
@@ -107,7 +188,9 @@ interface PinsViewProps {
   items: QueueItem[];
   failed: boolean;
   retrying: boolean;
+  availability: PinsAvailability;
   dismiss: (id: string) => void;
+  enable: () => void;
   markOpened: (id: string) => void;
   retry: () => void;
 }
@@ -116,13 +199,17 @@ export function PinsView({
   items,
   failed,
   retrying,
+  availability,
   dismiss,
+  enable,
   markOpened,
   retry,
 }: PinsViewProps) {
   const safe = items.filter((item) => safeHttpUrl(item.url));
   const hasCards = safe.length > 0;
-  const isOpen = hasCards || failed;
+  const needsOnboarding = availability === 'needs-access' || availability === 'enabling';
+  const showOnboarding = !hasCards && needsOnboarding;
+  const isOpen = hasCards || failed || showOnboarding;
 
   return (
     <section className="pins" aria-label="Pins" aria-hidden={!isOpen} data-open={isOpen}>
@@ -172,6 +259,14 @@ export function PinsView({
                     );
                   })}
                 </ul>
+              )}
+              {showOnboarding && (
+                <p className="pins-onboarding" role="status">
+                  <span>Pins is configured. Chrome needs access to that host.</span>
+                  <button type="button" onClick={enable} disabled={availability === 'enabling'}>
+                    {availability === 'enabling' ? 'Enabling…' : 'Enable Pins'}
+                  </button>
+                </p>
               )}
               {failed && (
                 <p className={`pins-error${hasCards ? ' pins-error--stale' : ''}`} role="status">
