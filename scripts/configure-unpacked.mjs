@@ -33,7 +33,13 @@ export async function configureUnpacked({
   configPath = resolve(homedir(), '.config/marktab/local.json'),
   outputDir = resolve(projectRoot, '.output/chrome-mv3'),
 } = {}) {
-  const source = JSON.parse(await readFile(configPath, 'utf8'));
+  const rawConfig = await readFile(configPath, 'utf8');
+  let source;
+  try {
+    source = JSON.parse(rawConfig);
+  } catch {
+    throw new Error('Local config is not valid JSON.');
+  }
   const config = normaliseLocalConfig(source);
 
   const bundledConfigPath = resolve(outputDir, 'marktab-local.json');

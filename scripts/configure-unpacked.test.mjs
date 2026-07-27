@@ -34,6 +34,29 @@ describe('normaliseLocalConfig', () => {
 });
 
 describe('configureUnpacked', () => {
+  it('reports malformed JSON without exposing source fragments', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'marktab-configure-'));
+    temporaryDirectories.push(directory);
+    const configPath = join(directory, 'local.json');
+    const dummySecret = 'MARKTAB_DUMMY_SECRET_7429';
+    await writeFile(
+      configPath,
+      `{"baseUrl":"https://pins.example","apiKey":"${dummySecret}",}`,
+    );
+
+    let thrown;
+    try {
+      await configureUnpacked({ configPath, outputDir: join(directory, 'output') });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown.message).toBe('Local config is not valid JSON.');
+    expect(thrown.message).not.toContain(dummySecret);
+    expect(thrown.message).not.toContain('MARKTAB_DUMMY_SECRET');
+  });
+
   it('writes a private bundled config without changing the generic manifest', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'marktab-configure-'));
     temporaryDirectories.push(directory);

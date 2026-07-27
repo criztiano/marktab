@@ -6,6 +6,14 @@ interface RuntimeVersionApi {
   reload(): void;
 }
 
+export interface ReloadSentinelStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+const RELOAD_SENTINEL_KEY = 'marktab.runtimeReloadPair';
+
 function numericParts(version: string): number[] | null {
   if (!/^\d+(?:\.\d+)*$/.test(version)) return null;
   return version.split('.').map(Number);
@@ -23,16 +31,33 @@ export function isVersionNewer(candidate: string, current: string): boolean {
   return false;
 }
 
-let reloadRequested = false;
-
 /** Reload runtime metadata once when Chrome serves newer cached new-tab assets
  * before noticing the unpacked manifest update. */
 export function reloadForNewerBundle(
   runtime: RuntimeVersionApi,
   bundleVersion = BUNDLE_VERSION,
+  storage: ReloadSentinelStorage = localStorage,
 ): boolean {
-  if (reloadRequested || !isVersionNewer(bundleVersion, runtime.getManifest().version)) return false;
-  reloadRequested = true;
+  const runtimeVersion = runtime.getManifest().version;
+  if (!isVersionNewer(bundleVersion, runtimeVersion)) {
+    try {
+      storage.removeItem(RELOAD_SENTINEL_KEY);
+    } catch {
+      // A storage failure must not prevent the new-tab page from rendering.
+    }
+    return false;
+  }
+
+  const stalePair = JSON.stringify([runtimeVersion, bundleVersion]);
+  try {
+    if (storage.getItem(RELOAD_SENTINEL_KEY) === stalePair) return false;
+    // Persist before reloading: the next document has a fresh module context.
+    storage.setItem(RELOAD_SENTINEL_KEY, stalePair);
+  } catch {
+    // Without a durable sentinel, reloading could loop across fresh documents.
+    return false;
+  }
+
   runtime.reload();
   return true;
 }

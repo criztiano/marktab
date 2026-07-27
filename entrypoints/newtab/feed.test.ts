@@ -5,6 +5,8 @@ import {
   createFeedClient,
   safeHttpUrl,
   originPattern,
+  hasHostAccess,
+  requestHostAccess,
   loadConfig,
   saveConfig,
   loadCachedItems,
@@ -62,6 +64,30 @@ describe('originPattern', () => {
   it('rejects wildcard hosts so they cannot become an all-sites grant', () => {
     expect(originPattern('https://*/*')).toBeNull();
     expect(originPattern('https://*.example.com/')).toBeNull();
+  });
+});
+
+describe('host access permissions', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('checks and requests only the configured origin and preserves a denial', async () => {
+    const contains = vi.fn().mockResolvedValue(false);
+    const request = vi.fn().mockResolvedValue(false);
+    vi.stubGlobal('browser', { permissions: { contains, request } });
+
+    await expect(hasHostAccess('https://pins.example:3335/api')).resolves.toBe(false);
+    await expect(requestHostAccess('https://pins.example:3335/api')).resolves.toBe(false);
+    expect(contains).toHaveBeenCalledWith({ origins: ['https://pins.example/*'] });
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith({ origins: ['https://pins.example/*'] });
+  });
+
+  it('does not invoke Chrome permissions for an invalid origin', async () => {
+    const request = vi.fn();
+    vi.stubGlobal('browser', { permissions: { request } });
+
+    await expect(requestHostAccess('not a URL')).resolves.toBe(false);
+    expect(request).not.toHaveBeenCalled();
   });
 });
 
