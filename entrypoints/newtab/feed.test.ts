@@ -265,7 +265,10 @@ describe('createFeedClient', () => {
     expect(items).toEqual([item]);
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://feed.test:3335/api/marktab/queue?status=queued&limit=12');
-    expect(init.headers).toEqual({ Authorization: 'Bearer secret', 'x-api-key': 'secret' });
+    expect(init).toMatchObject({
+      headers: { Authorization: 'Bearer secret', 'x-api-key': 'secret' },
+      redirect: 'error',
+    });
   });
 
   it('fetchQueue returns [] when the payload has no items', async () => {
@@ -286,7 +289,7 @@ describe('createFeedClient', () => {
 
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://feed.test:3335/api/marktab/queue/a%201/opened');
-    expect(init).toMatchObject({ method: 'POST', keepalive: true });
+    expect(init).toMatchObject({ method: 'POST', keepalive: true, redirect: 'error' });
     expect(init.headers).toEqual({ Authorization: 'Bearer secret', 'x-api-key': 'secret' });
   });
 
@@ -303,7 +306,8 @@ describe('createFeedClient', () => {
 
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://feed.test:3335/api/marktab/queue/a1/dismiss');
-    expect(init.method).toBe('POST');
+    expect(init).toMatchObject({ method: 'POST', keepalive: true, redirect: 'error' });
+    expect(init.headers).toEqual({ Authorization: 'Bearer secret', 'x-api-key': 'secret' });
   });
 
   it('a no-token config sends no auth header', async () => {

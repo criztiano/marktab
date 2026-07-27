@@ -77,13 +77,14 @@ export function createFeedClient(config: FeedConfig, fetchImpl: typeof fetch = f
       method: 'POST',
       headers,
       keepalive: true,
+      redirect: 'error',
     }).then((response) => {
       if (!response.ok) throw new Error(`Feed ${action} ${id} failed: ${response.status}`);
     });
 
   return {
     async fetchQueue(query) {
-      const response = await fetchImpl(buildQueueUrl(base, query), { headers });
+      const response = await fetchImpl(buildQueueUrl(base, query), { headers, redirect: 'error' });
       if (!response.ok) throw new Error(`Feed fetch failed: ${response.status}`);
       const data = (await response.json()) as { items?: QueueItem[] };
       return data.items ?? [];
