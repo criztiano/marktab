@@ -10,27 +10,60 @@ import {
   type QueueItem,
 } from './feed';
 
-/** Load the "Pins" feed on mount, stale-while-revalidate: show cached items
- *  immediately (no skeleton), then refresh in the background. The section is
- *  supplementary, so any failure just keeps what we have (or stays collapsed). */
-function useFeedQueue() {
-  const [items, setItems] = useState<QueueItem[]>([]);
-  const clientRef = useRef<FeedClient | null>(null);
-  const dismissedRef = useRef<Set<string>>(new Set()); // dismissed this session
-  const hydratedRef = useRef(false); // true once a real load has populated items
+interface FeedQueueState {
+  items: QueueItem[];
+  failed: boolean;
+  retrying: boolean;
+  dismiss: (id: string) => void;
+  markOpened: (id: string) => void;
+  retry: () => void;
+}
 
-  // Single cache writer: persist whatever is shown after the first real load, so
-  // the next open paints instantly. Keeping it here avoids side effects in setState.
+/** Stale-while-revalidate. Only a fetch failure from a configured, permitted
+ * source becomes visible; dormant or unavailable sources remain collapsed. */
+function useFeedQueue(): FeedQueueState {
+  const [items, setItems] = useState<QueueItem[]>([]);
+  const [failed, setFailed] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const clientRef = useRef<FeedClient | null>(null);
+  const retryRef = useRef<() => void>(() => {});
+  const dismissedRef = useRef<Set<string>>(new Set());
+  const hydratedRef = useRef(false);
+  const retryingRef = useRef(false);
+
   useEffect(() => {
     if (hydratedRef.current) void saveCachedItems(items);
   }, [items]);
 
   useEffect(() => {
     let alive = true;
-    const keep = (list: QueueItem[]) => list.filter((i) => !dismissedRef.current.has(i.id));
-    (async () => {
-      // Dormant until a host is configured AND access to it has been granted —
-      // check that first so we never paint stale cards from an inaccessible host.
+    const keep = (list: QueueItem[]) => list.filter((item) => !dismissedRef.current.has(item.id));
+
+    const refresh = async (isRetry: boolean) => {
+      const client = clientRef.current;
+      if (!client || retryingRef.current) return;
+      if (isRetry) {
+        retryingRef.current = true;
+        if (alive) setRetrying(true);
+      }
+      try {
+        const fresh = await client.fetchQueue();
+        if (!alive) return;
+        hydratedRef.current = true;
+        setItems(keep(fresh));
+        setFailed(false);
+      } catch {
+        if (alive) setFailed(true); // keep cached cards visible
+      } finally {
+        if (isRetry) {
+          retryingRef.current = false;
+          if (alive) setRetrying(false);
+        }
+      }
+    };
+
+    retryRef.current = () => void refresh(true);
+    void (async () => {
       const config = await loadConfig();
       if (!alive || !config.baseUrl) return;
       if (!(await hasHostAccess(config.baseUrl)) || !alive) return;
@@ -38,102 +71,124 @@ function useFeedQueue() {
       const cached = await loadCachedItems();
       if (alive && cached.length) {
         hydratedRef.current = true;
-        setItems(keep(cached)); // instant, no skeleton flash
+        setItems(keep(cached));
       }
-      const client = createFeedClient(config);
-      clientRef.current = client;
-      try {
-        const fresh = await client.fetchQueue();
-        if (!alive) return;
-        hydratedRef.current = true;
-        setItems(keep(fresh)); // drop anything dismissed while this load was in flight
-      } catch {
-        // Offline / endpoint error: keep cached items, otherwise stay collapsed.
-      }
+      clientRef.current = createFeedClient(config);
+      await refresh(false);
     })();
+
     return () => {
       alive = false;
+      retryRef.current = () => {};
     };
   }, []);
 
   const dismiss = (id: string) => {
-    dismissedRef.current.add(id); // so an in-flight refresh can't resurrect it
-    setItems((prev) => prev.filter((i) => i.id !== id)); // optimistic; cache syncs via effect
-    // Best-effort: a failed dismiss just means the item reappears on next load.
+    dismissedRef.current.add(id);
+    setItems((previous) => previous.filter((item) => item.id !== id));
     clientRef.current?.dismiss(id).catch(() => {});
   };
 
-  // Best-effort POST; swallow rejections so a failed callback on click-through
-  // never surfaces as an unhandled rejection.
   const markOpened = (id: string) => {
     clientRef.current?.markOpened(id).catch(() => {});
   };
 
-  return { items, dismiss, markOpened };
+  return {
+    items,
+    failed,
+    retrying,
+    dismiss,
+    markOpened,
+    retry: () => retryRef.current(),
+  };
 }
 
-export default function Pins() {
-  const { items, dismiss, markOpened } = useFeedQueue();
+interface PinsViewProps {
+  items: QueueItem[];
+  failed: boolean;
+  retrying: boolean;
+  dismiss: (id: string) => void;
+  markOpened: (id: string) => void;
+  retry: () => void;
+}
 
-  // Drop items whose URL isn't plain http(s) — they're remote-controlled and a
-  // javascript:/data: href would execute in the privileged extension origin.
+export function PinsView({
+  items,
+  failed,
+  retrying,
+  dismiss,
+  markOpened,
+  retry,
+}: PinsViewProps) {
   const safe = items.filter((item) => safeHttpUrl(item.url));
   const hasCards = safe.length > 0;
+  const isOpen = hasCards || failed;
 
-  // The section stays mounted (at zero height when empty) so the height can
-  // animate smoothly when cards first arrive — no layout jump.
   return (
-    <section className="pins" aria-label="Pins" aria-hidden={!hasCards} data-open={hasCards}>
+    <section className="pins" aria-label="Pins" aria-hidden={!isOpen} data-open={isOpen}>
       <div className="pins-anim">
         <div className="pins-clip">
-          {hasCards && (
+          {isOpen && (
             <>
               <h2 className="pins-title">Pins</h2>
-              <ul className="pins-row">
-                {safe.map((item, i) => {
-                  const image = safeHttpUrl(item.image_url);
-                  // reason: CSS custom property (--i) isn't part of CSSProperties
-                  const style = { '--i': i } as CSSProperties;
-                  return (
-                    <li key={item.id} className="pins-card" style={style}>
-                      <a
-                        className="pins-link"
-                        href={item.url}
-                        title={`${item.title}\n${item.url}`}
-                        onClick={() => markOpened(item.id)}
-                      >
-                        {image && (
-                          <img
-                            className="pins-img"
-                            src={image}
-                            alt=""
-                            loading="lazy"
-                            onError={(e) => {
-                              e.currentTarget.style.display = 'none'; // hide broken previews
-                            }}
-                          />
-                        )}
-                        <span className="pins-card-title">{item.title}</span>
-                        {(item.description || item.author) && (
-                          <span className="pins-meta">{item.description || item.author}</span>
-                        )}
-                      </a>
-                      <button
-                        type="button"
-                        className="pins-dismiss"
-                        aria-label={`Dismiss ${item.title}`}
-                        onClick={() => dismiss(item.id)}
-                      >
-                        ×
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
+              {hasCards && (
+                <ul className="pins-row">
+                  {safe.map((item, index) => {
+                    const image = safeHttpUrl(item.image_url);
+                    const style = { '--i': index } as CSSProperties;
+                    return (
+                      <li key={item.id} className="pins-card" style={style}>
+                        <a
+                          className="pins-link"
+                          href={item.url}
+                          title={`${item.title}\n${item.url}`}
+                          onClick={() => markOpened(item.id)}
+                        >
+                          {image && (
+                            <img
+                              className="pins-img"
+                              src={image}
+                              alt=""
+                              loading="lazy"
+                              onError={(event) => {
+                                event.currentTarget.style.display = 'none';
+                              }}
+                            />
+                          )}
+                          <span className="pins-card-title">{item.title}</span>
+                          {(item.description || item.author) && (
+                            <span className="pins-meta">{item.description || item.author}</span>
+                          )}
+                        </a>
+                        <button
+                          type="button"
+                          className="pins-dismiss"
+                          aria-label={`Dismiss ${item.title}`}
+                          onClick={() => dismiss(item.id)}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {failed && (
+                <p className={`pins-error${hasCards ? ' pins-error--stale' : ''}`} role="status">
+                  <span>{hasCards ? 'Couldn’t refresh Pins.' : 'Pins couldn’t load.'}</span>
+                  <button type="button" onClick={retry} disabled={retrying}>
+                    {retrying ? 'Retrying…' : 'Retry'}
+                  </button>
+                </p>
+              )}
             </>
           )}
         </div>
       </div>
     </section>
   );
+}
+
+export default function Pins() {
+  return <PinsView {...useFeedQueue()} />;
 }

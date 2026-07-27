@@ -25,9 +25,18 @@ npm run build
 
 Then in Chrome: `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select `.output/chrome-mv3/`.
 
+For a private unpacked build with Pins preconfigured, create `~/.config/marktab/local.json`:
+
+```json
+{ "baseUrl": "https://pins.example", "apiKey": "your-private-key" }
+```
+
+Then run `npm run build:local`. It builds the same generic source, patches only the generated manifest's required host permission, and writes a generated `marktab-local.json` into `.output/chrome-mv3/`. That output contains the key: keep it private, never commit or publish it. The regular `npm run build` remains credential-free and uses optional per-host permissions.
+
 ### Other commands
 
 ```bash
+npm run build:local     # private unpacked build from ~/.config/marktab/local.json
 npm run build:firefox   # Firefox build
 npm run zip             # store-ready zip
 npm run compile         # typecheck only
@@ -72,7 +81,7 @@ The `GET` returns `{ "items": [...] }`, each item:
 }
 ```
 
-If a token is configured it's sent as `Authorization: Bearer <token>`. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
+If a token is configured it's sent as both `Authorization: Bearer <token>` and `x-api-key: <token>` for backend compatibility. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
 
 ## Using this as a template
 

@@ -283,6 +283,40 @@ mark {
   outline-offset: 1px;
 }
 
+.pins-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 0 0 48px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pins-row + .pins-error {
+  margin-top: -36px;
+}
+
+.pins-error button {
+  padding: 2px 8px;
+  font: inherit;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.pins-error button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.pins-error button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Cards blur-fade in, staggered, after the height animation has run (--i = index) */
 @keyframes pins-card-in {
   from {

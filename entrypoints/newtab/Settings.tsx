@@ -137,7 +137,7 @@ export default function Settings({ onSaved }: SettingsProps) {
     }
     const config = { baseUrl: url, token: token.trim() };
     if (config.token && parsed.protocol !== 'https:') {
-      setStatus({ kind: 'error', message: 'Use an https URL when sending a token.' });
+      setStatus({ kind: 'error', message: 'Use an https URL when sending an API key / token.' });
       return;
     }
 
@@ -162,7 +162,7 @@ export default function Settings({ onSaved }: SettingsProps) {
       const message =
         e instanceof Error && e.message.startsWith('Feed ')
           ? e.message
-          : 'Couldn’t reach the server — check the URL and token.';
+          : 'Couldn’t reach the server — check the URL and API key / token.';
       next = { kind: 'error', message };
     } finally {
       savingRef.current = false;
@@ -219,7 +219,7 @@ export default function Settings({ onSaved }: SettingsProps) {
             </label>
 
             <label className="settings-field">
-              <span>API token</span>
+              <span>API key / token</span>
               <div className="settings-token">
                 <input
                   type={showToken ? 'text' : 'password'}

@@ -10,14 +10,21 @@ Chrome extension that replaces the new tab page with a minimal, searchable, maso
 - The whole UI lives in `entrypoints/newtab/` (App.tsx + style.css). Keep it single-entrypoint unless a feature truly needs a background worker.
 - Plain CSS with custom properties (no Tailwind). Dark mode via `prefers-color-scheme`.
 - Favicons come from Chrome's local cache: `chrome-extension://{id}/_favicon/?pageUrl=...` (requires `favicon` permission). No external favicon services — core bookmark browsing stays request-free.
-- **Network:** the only network layer is the optional "Pins" feed (`entrypoints/newtab/feed.ts` + `Pins.tsx`). No host is hardcoded and none is requested at install — the feed is dormant until the user sets a base URL in Settings; saving triggers a per-host `optional_host_permissions` grant (`optional_host_permissions: ['https://*/*','http://*/*']` in `wxt.config.ts`). Base URL + token live in `browser.storage.local` (`storage` permission); `loadConfig` migrates the legacy `eden*` keys. Keep all other surfaces request-free.
+- **Network:** the only network layer is the optional "Pins" feed (`entrypoints/newtab/feed.ts` + `Pins.tsx`). No host is hardcoded and none is requested at install — the feed is dormant until the user sets a base URL in Settings; saving triggers a per-host `optional_host_permissions` grant (`optional_host_permissions: ['https://*/*','http://localhost/*']` in `wxt.config.ts`). Base URL + token live in `browser.storage.local` (`storage` permission); `loadConfig` migrates the legacy `eden*` keys. Keep all other surfaces request-free.
 
 ## Commands
 
 - `npm run dev` — Chrome with HMR
-- `npm run build` — production build to `.output/chrome-mv3/`
+- `npm run build` — generic production build to `.output/chrome-mv3/`
+- `npm run build:local` — private unpacked build; reads `~/.config/marktab/local.json`, then patches only generated artifacts
 - `npm run compile` — typecheck only (tsc --noEmit)
 - `npm run zip` — store-ready zip
+
+## Delivery rules
+
+- Keep `DEFAULT_CONFIG` blank and public/WXT source generic. Never commit a host, token, generated `marktab-local.json`, or required private host permission.
+- Local delivery uses `scripts/configure-unpacked.mjs` only after WXT builds. It may patch `.output/chrome-mv3/manifest.json` and write the bundled local config, but must never log the key.
+- Keep `package.json` and `BUNDLE_VERSION` aligned. The new-tab entrypoint compares the bundle version to runtime manifest metadata and requests at most one runtime reload when cached assets are newer.
 
 ## Architecture notes
 
