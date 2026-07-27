@@ -83,7 +83,7 @@ The `GET` returns `{ "items": [...] }`, each item:
 }
 ```
 
-If a token is configured it's sent as both `Authorization: Bearer <token>` and `x-api-key: <token>` for backend compatibility. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
+If a token is configured it's sent as both `Authorization: Bearer <token>` and `x-api-key: <token>` for backend compatibility. Authenticated Marktab API endpoints must be direct: HTTP redirects are rejected so credentials remain on the configured origin. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
 
 ## Using this as a template
 
