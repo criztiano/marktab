@@ -25,9 +25,18 @@ npm run build
 
 Then in Chrome: `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select `.output/chrome-mv3/`.
 
+For a private unpacked build with Pins preconfigured, create `~/.config/marktab/local.json`:
+
+```json
+{ "baseUrl": "https://pins.example", "apiKey": "your-private-key" }
+```
+
+Then run `npm run build:local`. It builds the same generic extension and writes only a generated `marktab-local.json` into `.output/chrome-mv3/`; it does **not** add required `host_permissions`. Both generic and local manifests retain only the optional per-host permission patterns. On the first new or upgraded local launch, click **Enable Pins** in the Pins row and approve Chrome's one-time grant for the configured host; Pins loads immediately without a page reload. The generated config contains the key: keep the output private and never commit or publish it.
+
 ### Other commands
 
 ```bash
+npm run build:local     # private unpacked build from ~/.config/marktab/local.json
 npm run build:firefox   # Firefox build
 npm run zip             # store-ready zip
 npm run compile         # typecheck only
@@ -40,13 +49,15 @@ npm run compile         # typecheck only
 - Bookmark events (`onCreated`, `onRemoved`, `onChanged`, `onMoved`) re-render the list live.
 - Favicons come from Chrome's local cache via the `_favicon/` endpoint (`favicon` permission) — no external requests for core bookmark browsing.
 - Search box filters by title/URL; Enter opens the first match.
-- **Try next** (optional) — see [below](#try-next-optional-feed). Off until you point it at a server; otherwise the new tab is just your bookmarks.
+- **Pins** (optional) — see [below](#pins-optional-feed). Off until you point it at a server; otherwise the new tab is just your bookmarks.
 
-### Try next (optional feed)
+### Pins (optional feed)
 
-"Try next" is an **optional** top row of cards you want to read/try later, served by *your own* backend. It ships **dormant** — the extension requests no network access at install and the row doesn't appear until you configure a server. It's the only part of marktab that ever touches the network, and only the host you set.
+"Pins" is an **optional** top row of cards you want to read/try later, served by *your own* backend. It ships **dormant** — the extension requests no network access at install and the row doesn't appear until you configure a server. It's the only part of marktab that ever touches the network, and only the host you set.
 
 **Configure it** with the **gear button** (top-right): enter your server's base URL (+ an optional API token) and hit **Save & test**. The browser asks once to allow access to that host; then marktab saves the values and verifies the connection inline. An `https` URL is required when you set a token.
+
+A local build is already configured, so its first new tab instead shows a compact **Enable Pins** prompt. Clicking it asks Chrome for only that configured host, then loads cached and live cards in place. Cancelling leaves the prompt ready to try again and does not affect bookmark browsing.
 
 **Bring your own backend** — implement these three endpoints and point marktab at them:
 
@@ -72,7 +83,7 @@ The `GET` returns `{ "items": [...] }`, each item:
 }
 ```
 
-If a token is configured it's sent as `Authorization: Bearer <token>`. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
+If a token is configured it's sent as both `Authorization: Bearer <token>` and `x-api-key: <token>` for backend compatibility. Authenticated Marktab API endpoints must be direct: HTTP redirects are rejected so credentials remain on the configured origin. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
 
 ## Using this as a template
 
@@ -98,7 +109,7 @@ wxt.config.ts         # manifest config
 
 ## Privacy
 
-Core bookmark browsing stays fully local: bookmarks are read via `chrome.bookmarks` and favicons come from Chrome's own cache — no network requests, and the extension requests **no host access at install**. The only network traffic is the optional **Try next** feed: once you configure a server and grant access to it, marktab fetches the queue from that host (and loads each card's preview image from its own origin). Leave it unconfigured and marktab never touches the network.
+Core bookmark browsing stays fully local: bookmarks are read via `chrome.bookmarks` and favicons come from Chrome's own cache — no network requests, and the extension requests **no host access at install**. The only network traffic is the optional **Pins** feed: once you configure a server and grant access to it, marktab fetches the queue from that host (and loads each card's preview image from its own origin). Leave it unconfigured and marktab never touches the network.
 
 ## License
 

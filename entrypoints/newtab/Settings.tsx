@@ -137,7 +137,7 @@ export default function Settings({ onSaved }: SettingsProps) {
     }
     const config = { baseUrl: url, token: token.trim() };
     if (config.token && parsed.protocol !== 'https:') {
-      setStatus({ kind: 'error', message: 'Use an https URL when sending a token.' });
+      setStatus({ kind: 'error', message: 'Use an https URL when sending an API key / token.' });
       return;
     }
 
@@ -162,7 +162,7 @@ export default function Settings({ onSaved }: SettingsProps) {
       const message =
         e instanceof Error && e.message.startsWith('Feed ')
           ? e.message
-          : 'Couldn’t reach the server — check the URL and token.';
+          : 'Couldn’t reach the server — check the URL and API key / token.';
       next = { kind: 'error', message };
     } finally {
       savingRef.current = false;
@@ -200,10 +200,10 @@ export default function Settings({ onSaved }: SettingsProps) {
             aria-labelledby="settings-title"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="settings-title" className="settings-title">Try next source</h2>
+            <h2 id="settings-title" className="settings-title">Pins source</h2>
             <p className="settings-help">
               Point this at a server that implements the marktab queue API (see the README). Leave it
-              blank to hide the Try next row.
+              blank to hide the Pins row.
             </p>
 
             <label className="settings-field">
@@ -219,7 +219,7 @@ export default function Settings({ onSaved }: SettingsProps) {
             </label>
 
             <label className="settings-field">
-              <span>API token</span>
+              <span>API key / token</span>
               <div className="settings-token">
                 <input
                   type={showToken ? 'text' : 'password'}

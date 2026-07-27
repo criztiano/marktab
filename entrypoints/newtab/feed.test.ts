@@ -5,6 +5,8 @@ import {
   createFeedClient,
   safeHttpUrl,
   originPattern,
+  hasHostAccess,
+  requestHostAccess,
   loadConfig,
   saveConfig,
   loadCachedItems,
@@ -35,8 +37,11 @@ describe('buildQueueUrl', () => {
 });
 
 describe('buildHeaders', () => {
-  it('adds a Bearer header when a token is present', () => {
-    expect(buildHeaders('secret')).toEqual({ Authorization: 'Bearer secret' });
+  it('adds Bearer and x-api-key headers when a token is present', () => {
+    expect(buildHeaders('secret')).toEqual({
+      Authorization: 'Bearer secret',
+      'x-api-key': 'secret',
+    });
   });
 
   it('omits the header when there is no token', () => {
@@ -62,6 +67,30 @@ describe('originPattern', () => {
   });
 });
 
+describe('host access permissions', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('checks and requests only the configured origin and preserves a denial', async () => {
+    const contains = vi.fn().mockResolvedValue(false);
+    const request = vi.fn().mockResolvedValue(false);
+    vi.stubGlobal('browser', { permissions: { contains, request } });
+
+    await expect(hasHostAccess('https://pins.example:3335/api')).resolves.toBe(false);
+    await expect(requestHostAccess('https://pins.example:3335/api')).resolves.toBe(false);
+    expect(contains).toHaveBeenCalledWith({ origins: ['https://pins.example/*'] });
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith({ origins: ['https://pins.example/*'] });
+  });
+
+  it('does not invoke Chrome permissions for an invalid origin', async () => {
+    const request = vi.fn();
+    vi.stubGlobal('browser', { permissions: { request } });
+
+    await expect(requestHostAccess('not a URL')).resolves.toBe(false);
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
 describe('storage (config + cache)', () => {
   afterEach(() => vi.unstubAllGlobals());
 
@@ -72,9 +101,15 @@ describe('storage (config + cache)', () => {
       const list = Array.isArray(keys) ? keys : [keys];
       return Object.fromEntries(list.filter((k) => k in store).map((k) => [k, store[k]]));
     });
-    const remove = vi.fn(async (key: string) => void delete store[key]);
-    vi.stubGlobal('browser', { storage: { local: { get, set, remove } } });
-    return { store, set, get, remove };
+    const remove = vi.fn(async (keys: string | string[]) => {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete store[key];
+    });
+    const getURL = vi.fn((path: string) =>
+      `chrome-extension://test${path.startsWith('/') ? path : `/${path}`}`);
+    vi.stubGlobal('browser', { storage: { local: { get, set, remove } }, runtime: { getURL } });
+    const bundledFetch = vi.fn().mockRejectedValue(new Error('not bundled'));
+    vi.stubGlobal('fetch', bundledFetch);
+    return { store, set, get, remove, getURL, bundledFetch };
   }
 
   it('loadConfig returns stored feed values when present', async () => {
@@ -97,9 +132,57 @@ describe('storage (config + cache)', () => {
     expect(await loadConfig()).toEqual({ baseUrl: 'https://new/', token: 'newtok' });
   });
 
-  it('loadConfig resolves each field independently (mixed feed*/eden*)', async () => {
+  it('loadConfig treats any canonical feed* storage as authoritative', async () => {
     stubStorage({ feedBaseUrl: 'https://new/', edenToken: 'oldtok' });
-    expect(await loadConfig()).toEqual({ baseUrl: 'https://new/', token: 'oldtok' });
+    expect(await loadConfig()).toEqual({ baseUrl: 'https://new/', token: '' });
+  });
+
+  it('loadConfig uses and migrates a valid bundled config before legacy values', async () => {
+    const storage = stubStorage({
+      edenBaseUrl: 'https://legacy.invalid/',
+      edenToken: 'legacy-placeholder',
+      feedQueueCache: ['stale'],
+    });
+    storage.bundledFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ baseUrl: 'https://bundle.example/api/', token: 'bundle-placeholder' }),
+    });
+
+    expect(await loadConfig()).toEqual({
+      baseUrl: 'https://bundle.example/api/',
+      token: 'bundle-placeholder',
+    });
+    expect(storage.getURL).toHaveBeenCalledWith('/');
+    expect(storage.bundledFetch).toHaveBeenCalledWith('chrome-extension://test/marktab-local.json', {
+      cache: 'no-store',
+    });
+    expect(storage.set).toHaveBeenCalledWith({
+      feedBaseUrl: 'https://bundle.example/api/',
+      feedToken: 'bundle-placeholder',
+    });
+    expect(storage.remove).toHaveBeenCalledWith([
+      'feedQueueCache',
+      'edenBaseUrl',
+      'edenToken',
+    ]);
+  });
+
+  it.each([
+    { baseUrl: 'http://bundle.example', token: 'bundle-placeholder' },
+    { baseUrl: 'https://bundle.example', token: '' },
+    { baseUrl: 'not a URL', token: 'bundle-placeholder' },
+  ])('loadConfig ignores invalid bundled config %#', async (bundled) => {
+    const storage = stubStorage({ edenBaseUrl: 'https://legacy.example/', edenToken: 'legacy' });
+    storage.bundledFetch.mockResolvedValue({ ok: true, json: async () => bundled });
+
+    expect(await loadConfig()).toEqual({ baseUrl: 'https://legacy.example/', token: 'legacy' });
+    expect(storage.set).not.toHaveBeenCalled();
+  });
+
+  it('loadConfig ignores a missing bundled file and remains dormant', async () => {
+    const storage = stubStorage();
+    storage.bundledFetch.mockResolvedValue({ ok: false, status: 404 });
+    expect(await loadConfig()).toEqual(DEFAULT_CONFIG);
   });
 
   it('loadConfig falls back to the empty default when storage is empty', async () => {
@@ -182,7 +265,10 @@ describe('createFeedClient', () => {
     expect(items).toEqual([item]);
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://feed.test:3335/api/marktab/queue?status=queued&limit=12');
-    expect(init.headers).toEqual({ Authorization: 'Bearer secret' });
+    expect(init).toMatchObject({
+      headers: { Authorization: 'Bearer secret', 'x-api-key': 'secret' },
+      redirect: 'error',
+    });
   });
 
   it('fetchQueue returns [] when the payload has no items', async () => {
@@ -203,8 +289,8 @@ describe('createFeedClient', () => {
 
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://feed.test:3335/api/marktab/queue/a%201/opened');
-    expect(init).toMatchObject({ method: 'POST', keepalive: true });
-    expect(init.headers).toEqual({ Authorization: 'Bearer secret' });
+    expect(init).toMatchObject({ method: 'POST', keepalive: true, redirect: 'error' });
+    expect(init.headers).toEqual({ Authorization: 'Bearer secret', 'x-api-key': 'secret' });
   });
 
   it('markOpened rejects on a non-OK response', async () => {
@@ -220,7 +306,8 @@ describe('createFeedClient', () => {
 
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe('https://feed.test:3335/api/marktab/queue/a1/dismiss');
-    expect(init.method).toBe('POST');
+    expect(init).toMatchObject({ method: 'POST', keepalive: true, redirect: 'error' });
+    expect(init.headers).toEqual({ Authorization: 'Bearer secret', 'x-api-key': 'secret' });
   });
 
   it('a no-token config sends no auth header', async () => {
