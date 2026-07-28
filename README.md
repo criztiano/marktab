@@ -53,37 +53,40 @@ npm run compile         # typecheck only
 
 ### Pins (optional feed)
 
-"Pins" is an **optional** top row of cards you want to read/try later, served by *your own* backend. It ships **dormant** — the extension requests no network access at install and the row doesn't appear until you configure a server. It's the only part of marktab that ever touches the network, and only the host you set.
+"Pins" is an **optional** horizontal row backed by persistent pins from your Garden. It ships **dormant** — the extension requests no network access at install and the row stays hidden until you configure a server. The feed client talks only to that configured host.
 
-**Configure it** with the **gear button** (top-right): enter your server's base URL (+ an optional API token) and hit **Save & test**. The browser asks once to allow access to that host; then marktab saves the values and verifies the connection inline. An `https` URL is required when you set a token.
+**Configure it** with the **gear button** (top-right): enter your server's base URL (+ an optional API token) and hit **Save & test**. Chrome asks once for that host; then Marktab saves the values and verifies the connection inline. An `https` URL is required when you set a token.
 
-A local build is already configured, so its first new tab instead shows a compact **Enable Pins** prompt. Clicking it asks Chrome for only that configured host, then loads cached and live cards in place. Cancelling leaves the prompt ready to try again and does not affect bookmark browsing.
+A local build is already configured, so its first new tab instead shows a compact **Enable Pins** prompt. Clicking it asks Chrome for only that configured host, then paints the V2 cache immediately and refreshes live pins in place. Cancelling leaves the prompt ready to try again and does not affect bookmark browsing.
 
-**Bring your own backend** — implement these three endpoints and point marktab at them:
+**Backend contract** — expose these endpoints at the configured base URL:
 
 | Method & path | Purpose |
 |---|---|
-| `GET /api/marktab/queue?status=queued&limit=12` | Return the cards to show |
-| `POST /api/marktab/queue/:id/opened` | Called after a card is opened |
-| `POST /api/marktab/queue/:id/dismiss` | Called when a card is dismissed |
+| `GET /api/marktab/queue?limit=12` | Return persistent Garden pins (limit is bounded to 1–50) |
+| `POST /api/marktab/queue/:id/dismiss` | Explicitly unpin via the compatibility route |
 
-The `GET` returns `{ "items": [...] }`, each item:
+Ordinary card opening is navigation-only and sends no mutation. The `GET` returns `{ "items": [...] }`, each item:
 
 ```jsonc
 {
-  "id": "string",            // required
-  "title": "string",         // required
-  "url": "https://…",        // required (http/https only)
-  "description": "string",   // optional
-  "image_url": "https://…",  // optional preview image
-  "author": "string",        // optional
-  "source": "string",
-  "queued_at": "ISO string",
-  "status": "queued"
+  "id": "string",               // required
+  "title": "string",            // required
+  "url": "https://…",           // required (http/https only)
+  "media": {                     // optional canonical media
+    "kind": "image | video",
+    "url": "https://…",         // direct public media only
+    "poster_url": "https://…"   // optional video poster
+  },
+  "image_url": "https://…",     // optional image compatibility alias
+  "source": "garden",
+  "pinned_at": "ISO string"
 }
 ```
 
-If a token is configured it's sent as both `Authorization: Bearer <token>` and `x-api-key: <token>` for backend compatibility. Authenticated Marktab API endpoints must be direct: HTTP redirects are rejected so credentials remain on the configured origin. Items with a non-`http(s)` `url` are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
+Cards are media-first and show only the pin title. Direct public images and videos load natively with reserved 16:9 geometry; missing, unsafe, protected, or failed media falls back to an art treatment using Chrome's local favicon cache. Authenticated Garden media proxy URLs such as `/api/garden/media` and `/remote-media` are deliberately not embedded because media elements cannot send the feed token. A video's poster may paint immediately, but its source is omitted until the card nears the viewport; it then upgrades to metadata preload, plays muted only while in view, pauses offscreen, and never autoplays under reduced-motion preferences.
+
+If a token is configured it is sent as both `Authorization: Bearer …` and `x-api-key: …` for backend compatibility. Authenticated Marktab API endpoints must be direct: HTTP redirects are rejected so credentials remain on the configured origin. Items with a non-`http(s)` navigation URL are dropped for safety. Defaults and the client live in `entrypoints/newtab/feed.ts`.
 
 ## Using this as a template
 
@@ -109,7 +112,7 @@ wxt.config.ts         # manifest config
 
 ## Privacy
 
-Core bookmark browsing stays fully local: bookmarks are read via `chrome.bookmarks` and favicons come from Chrome's own cache — no network requests, and the extension requests **no host access at install**. The only network traffic is the optional **Pins** feed: once you configure a server and grant access to it, marktab fetches the queue from that host (and loads each card's preview image from its own origin). Leave it unconfigured and marktab never touches the network.
+Core bookmark browsing stays fully local: bookmarks are read via `chrome.bookmarks` and favicons come from Chrome's own cache — no network requests, and the extension requests **no host access at install**. Optional **Pins** traffic begins only after you configure and grant one feed host. Cards may then load the direct public image/video URLs returned by that feed; protected Garden media-proxy URLs are suppressed. Leave Pins unconfigured and Marktab never touches the network.
 
 ## License
 

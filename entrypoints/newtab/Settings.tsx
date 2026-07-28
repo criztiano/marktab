@@ -26,7 +26,7 @@ function statusText(status: Status): string {
     case 'testing':
       return 'Testing…';
     case 'ok':
-      return `Connected — ${status.count} ${status.count === 1 ? 'item' : 'items'} queued.`;
+      return `Connected — ${status.count} ${status.count === 1 ? 'pin' : 'pins'}.`;
     case 'error':
       return status.message;
   }
@@ -202,7 +202,7 @@ export default function Settings({ onSaved }: SettingsProps) {
           >
             <h2 id="settings-title" className="settings-title">Pins source</h2>
             <p className="settings-help">
-              Point this at a server that implements the marktab queue API (see the README). Leave it
+              Point this at a server that exposes Garden-backed Marktab Pins (see the README). Leave it
               blank to hide the Pins row.
             </p>
 

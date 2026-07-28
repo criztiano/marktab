@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type RefObject,
+} from 'react';
 import {
   createFeedClient,
   hasHostAccess,
@@ -6,27 +13,47 @@ import {
   loadConfig,
   requestHostAccess,
   safeHttpUrl,
+  safeMediaUrl,
   saveCachedItems,
   type FeedClient,
   type FeedConfig,
-  type QueueItem,
+  type PinItem,
+  type PinMedia,
 } from './feed';
 
 export type PinsAvailability = 'unconfigured' | 'needs-access' | 'enabling' | 'ready';
 
 interface FeedQueueState {
-  items: QueueItem[];
+  items: PinItem[];
   failed: boolean;
   retrying: boolean;
   availability: PinsAvailability;
-  dismiss: (id: string) => void;
+  unpin: (id: string) => void;
   enable: () => void;
-  markOpened: (id: string) => void;
   retry: () => void;
 }
 
-/** Keep the permissions request as the first async operation reached by the
- * button handler so Chrome can associate it with the user's click gesture. */
+interface PlaybackPolicy {
+  inView: boolean;
+  reducedMotion: boolean;
+  failed: boolean;
+}
+
+export function shouldPlayVideo({ inView, reducedMotion, failed }: PlaybackPolicy): boolean {
+  return inView && !reducedMotion && !failed;
+}
+
+export function videoPreload(nearViewport: boolean): 'none' | 'metadata' {
+  return nearViewport ? 'metadata' : 'none';
+}
+
+/** Omitting src (rather than relying on preload="none") is the network gate. */
+export function videoSource(url: string, nearViewport: boolean): string | undefined {
+  return nearViewport ? url : undefined;
+}
+
+/** Keep permissions.request as the first async operation reached by the button
+ * so Chrome can associate it with the user's click gesture. */
 export function requestPinsAccess(
   baseUrl: string,
   request: (url: string) => Promise<boolean> = requestHostAccess,
@@ -34,16 +61,149 @@ export function requestPinsAccess(
   return request(baseUrl);
 }
 
-/** Stale-while-revalidate. Unconfigured sources remain collapsed; configured
- * sources without access show a one-click permission onboarding state. */
+function localFaviconUrl(pageUrl: string): string {
+  return `chrome-extension://${browser.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=64`;
+}
+
+function publicMedia(item: PinItem): PinMedia | null {
+  const canonicalUrl = safeMediaUrl(item.media?.url);
+  if (item.media && canonicalUrl) {
+    return {
+      kind: item.media.kind,
+      url: canonicalUrl,
+      ...(item.media.kind === 'video'
+        ? { poster_url: safeMediaUrl(item.media.poster_url) ?? undefined }
+        : {}),
+    };
+  }
+  const compatibilityImage = safeMediaUrl(item.image_url);
+  return compatibilityImage ? { kind: 'image', url: compatibilityImage } : null;
+}
+
+function useNearViewport(target: RefObject<HTMLElement>, enabled: boolean): boolean {
+  const [near, setNear] = useState(false);
+  useEffect(() => {
+    const element = target.current;
+    if (!enabled || !element || near) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setNear(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setNear(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '240px 0px' },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [enabled, near, target]);
+  return near;
+}
+
+function useInView(target: RefObject<HTMLElement>, enabled: boolean): boolean {
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const element = target.current;
+    if (!enabled || !element || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      ([entry]) => setInView(entry.isIntersecting && entry.intersectionRatio >= 0.5),
+      { threshold: [0, 0.5] },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [enabled, target]);
+  return inView;
+}
+
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
+  useEffect(() => {
+    if (typeof matchMedia === 'undefined') return;
+    const query = matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  return reduced;
+}
+
+function PinMediaPreview({ item }: { item: PinItem }) {
+  const media = publicMedia(item);
+  const [failed, setFailed] = useState(false);
+  const containerRef = useRef<HTMLSpanElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const isVideo = media?.kind === 'video';
+  const nearViewport = useNearViewport(containerRef, isVideo);
+  const inView = useInView(containerRef, isVideo);
+  const reducedMotion = useReducedMotion();
+
+  useEffect(() => setFailed(false), [media?.url]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (shouldPlayVideo({ inView, reducedMotion, failed })) {
+      void video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [failed, inView, reducedMotion]);
+
+  return (
+    <span ref={containerRef} className="pins-media" aria-hidden="true">
+      <span className="pins-media-fallback">
+        <img
+          src={localFaviconUrl(item.url)}
+          alt=""
+          width={40}
+          height={40}
+          loading="lazy"
+          decoding="async"
+        />
+      </span>
+      {media?.kind === 'image' && !failed && (
+        <img
+          className="pins-media-asset"
+          src={media.url}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      )}
+      {media?.kind === 'video' && !failed && (
+        <video
+          ref={videoRef}
+          className="pins-media-asset"
+          src={videoSource(media.url, nearViewport)}
+          poster={media.poster_url}
+          muted
+          loop
+          playsInline
+          preload={videoPreload(nearViewport)}
+          onError={() => setFailed(true)}
+        />
+      )}
+    </span>
+  );
+}
+
+/** Stale-while-revalidate with explicit host-access onboarding. */
 function useFeedQueue(): FeedQueueState {
-  const [items, setItems] = useState<QueueItem[]>([]);
+  const [items, setItems] = useState<PinItem[]>([]);
   const [failed, setFailed] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [availability, setAvailability] = useState<PinsAvailability>('unconfigured');
   const clientRef = useRef<FeedClient | null>(null);
   const configRef = useRef<FeedConfig | null>(null);
-  const dismissedRef = useRef<Set<string>>(new Set());
+  const unpinnedRef = useRef<Set<string>>(new Set());
   const hydratedRef = useRef(false);
   const mountedRef = useRef(false);
   const retryingRef = useRef(false);
@@ -61,7 +221,7 @@ function useFeedQueue(): FeedQueueState {
   }, [items]);
 
   const keep = useCallback(
-    (list: QueueItem[]) => list.filter((item) => !dismissedRef.current.has(item.id)),
+    (list: PinItem[]) => list.filter((item) => !unpinnedRef.current.has(item.id)),
     [],
   );
 
@@ -80,7 +240,7 @@ function useFeedQueue(): FeedQueueState {
         setItems(keep(fresh));
         setFailed(false);
       } catch {
-        if (mountedRef.current) setFailed(true); // keep cached cards visible
+        if (mountedRef.current) setFailed(true);
       } finally {
         if (isRetry) {
           retryingRef.current = false;
@@ -94,7 +254,7 @@ function useFeedQueue(): FeedQueueState {
   const activate = useCallback(
     async (config: FeedConfig, showProgress: boolean) => {
       setFailed(false);
-      let cached: QueueItem[] = [];
+      let cached: PinItem[] = [];
       try {
         cached = await loadCachedItems();
       } catch {
@@ -128,8 +288,7 @@ function useFeedQueue(): FeedQueueState {
       try {
         permitted = await hasHostAccess(config.baseUrl);
       } catch {
-        // Treat an unavailable permission check like a missing grant: keep the
-        // configured source visible and let the explicit click try again.
+        // Keep onboarding visible and let the explicit click try again.
       }
       if (!permitted) {
         if (mountedRef.current) setAvailability('needs-access');
@@ -143,7 +302,6 @@ function useFeedQueue(): FeedQueueState {
     const config = configRef.current;
     if (!config || enablingRef.current) return;
     enablingRef.current = true;
-    // Call immediately from the click handler; do not put storage/cache work first.
     const permission = requestPinsAccess(config.baseUrl);
     setAvailability('enabling');
     void permission
@@ -162,14 +320,10 @@ function useFeedQueue(): FeedQueueState {
       });
   };
 
-  const dismiss = (id: string) => {
-    dismissedRef.current.add(id);
+  const unpin = (id: string) => {
+    unpinnedRef.current.add(id);
     setItems((previous) => previous.filter((item) => item.id !== id));
-    clientRef.current?.dismiss(id).catch(() => {});
-  };
-
-  const markOpened = (id: string) => {
-    clientRef.current?.markOpened(id).catch(() => {});
+    clientRef.current?.unpin(id).catch(() => {});
   };
 
   return {
@@ -177,21 +331,19 @@ function useFeedQueue(): FeedQueueState {
     failed,
     retrying,
     availability,
-    dismiss,
+    unpin,
     enable,
-    markOpened,
     retry: () => void refresh(true),
   };
 }
 
 interface PinsViewProps {
-  items: QueueItem[];
+  items: PinItem[];
   failed: boolean;
   retrying: boolean;
   availability: PinsAvailability;
-  dismiss: (id: string) => void;
+  unpin: (id: string) => void;
   enable: () => void;
-  markOpened: (id: string) => void;
   retry: () => void;
 }
 
@@ -200,9 +352,8 @@ export function PinsView({
   failed,
   retrying,
   availability,
-  dismiss,
+  unpin,
   enable,
-  markOpened,
   retry,
 }: PinsViewProps) {
   const safe = items.filter((item) => safeHttpUrl(item.url));
@@ -221,37 +372,18 @@ export function PinsView({
               {hasCards && (
                 <ul className="pins-row">
                   {safe.map((item, index) => {
-                    const image = safeHttpUrl(item.image_url);
                     const style = { '--i': index } as CSSProperties;
                     return (
                       <li key={item.id} className="pins-card" style={style}>
-                        <a
-                          className="pins-link"
-                          href={item.url}
-                          title={`${item.title}\n${item.url}`}
-                          onClick={() => markOpened(item.id)}
-                        >
-                          {image && (
-                            <img
-                              className="pins-img"
-                              src={image}
-                              alt=""
-                              loading="lazy"
-                              onError={(event) => {
-                                event.currentTarget.style.display = 'none';
-                              }}
-                            />
-                          )}
+                        <a className="pins-link" href={item.url} title={item.title}>
+                          <PinMediaPreview item={item} />
                           <span className="pins-card-title">{item.title}</span>
-                          {(item.description || item.author) && (
-                            <span className="pins-meta">{item.description || item.author}</span>
-                          )}
                         </a>
                         <button
                           type="button"
                           className="pins-dismiss"
-                          aria-label={`Dismiss ${item.title}`}
-                          onClick={() => dismiss(item.id)}
+                          aria-label={`Unpin ${item.title}`}
+                          onClick={() => unpin(item.id)}
                         >
                           ×
                         </button>
