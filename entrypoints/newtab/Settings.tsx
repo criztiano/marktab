@@ -18,6 +18,17 @@ type Status =
   | { kind: 'ok'; count: number }
   | { kind: 'error'; message: string };
 
+export async function verifyAndSavePinsConfig(
+  config: { baseUrl: string; token: string },
+  fetchItems: (config: { baseUrl: string; token: string }) => Promise<unknown[]> = (value) =>
+    createFeedClient(value).fetchQueue(),
+  persist: (config: { baseUrl: string; token: string }) => Promise<void> = saveConfig,
+): Promise<unknown[]> {
+  const items = await fetchItems(config);
+  await persist(config);
+  return items;
+}
+
 /** Exhaustive over Status — a new variant without a case fails the build. */
 function statusText(status: Status): string {
   switch (status.kind) {
@@ -122,7 +133,7 @@ export default function Settings({ onSaved }: SettingsProps) {
     return () => document.removeEventListener('keydown', onKey, true);
   }, [open, close]);
 
-  // Save then verify: request host access, persist, then fetch with the values.
+  // Verify then save: request host access, validate the Garden envelope, then persist.
   const save = async () => {
     if (savingRef.current) return; // ignore double-submit
     const url = baseUrl.trim();
@@ -152,9 +163,8 @@ export default function Settings({ onSaved }: SettingsProps) {
       if (!granted) {
         next = { kind: 'error', message: `Allow access to ${parsed.hostname} to connect.` };
       } else {
-        await saveConfig(config);
+        const items = await verifyAndSavePinsConfig(config);
         saved = true;
-        const items = await createFeedClient(config).fetchQueue();
         next = { kind: 'ok', count: items.length };
       }
     } catch (e) {

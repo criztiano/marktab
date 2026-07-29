@@ -76,22 +76,76 @@ export function safeHttpUrl(raw: string | undefined): string | null {
  * resources belong in img/video. In particular, reject Eden's authenticated
  * media proxy routes (observed to fail without auth) and credentialed URLs. */
 function hasSensitiveMediaQuery(url: URL): boolean {
-  for (const key of url.searchParams.keys()) {
-    const compact = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const keys = Array.from(url.searchParams.keys(), (key) =>
+    key.toLowerCase().replace(/[^a-z0-9]/g, ''),
+  );
+  const explicitParts = [
+    'accesskey',
+    'apikey',
+    'authorisation',
+    'authorization',
+    'credential',
+    'keypairid',
+    'oauth',
+    'password',
+    'secret',
+    'session',
+    'signature',
+    'signed',
+    'token',
+  ];
+  for (const compact of keys) {
     if (
-      compact.includes('token') ||
       compact === 'auth' ||
-      compact === 'authorization' ||
-      compact === 'authentication' ||
-      compact === 'oauth' ||
-      compact === 'apikey' ||
-      compact === 'xapikey' ||
-      (compact.startsWith('auth') && !compact.startsWith('author'))
+      compact === 'key' ||
+      compact === 'policy' ||
+      compact === 'se' ||
+      compact === 'sig' ||
+      compact === 'sp' ||
+      compact === 'sv' ||
+      explicitParts.some((part) => compact.includes(part))
     ) {
       return true;
     }
   }
-  return false;
+
+  // Standard signed-capability families are credentials even when none of
+  // their individual parameter names says "token" or "auth".
+  if (keys.some((key) => key.startsWith('xamz') || key.startsWith('xgoog'))) return true;
+  const keySet = new Set(keys);
+  return keySet.has('sig') && ['sv', 'se', 'sp', 'sr', 'skoid', 'sktid'].some((key) => keySet.has(key));
+}
+
+function ipv6Bytes(hostname: string): number[] | null {
+  let host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const zoneIndex = host.indexOf('%');
+  if (zoneIndex >= 0) host = host.slice(0, zoneIndex);
+  const lastColon = host.lastIndexOf(':');
+  if (host.includes('.') && lastColon >= 0) {
+    const dotted = host.slice(lastColon + 1);
+    if (!/^\d+(?:\.\d+){3}$/.test(dotted)) return null;
+    const octets = dotted.split('.').map(Number);
+    if (octets.some((part) => part < 0 || part > 255)) return null;
+    host = `${host.slice(0, lastColon)}:${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+  }
+  const halves = host.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return null;
+  const groups = [...left, ...Array(Math.max(0, missing)).fill('0'), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.flatMap((group) => {
+    const value = Number.parseInt(group, 16);
+    return [value >> 8, value & 0xff];
+  });
+}
+
+function embeddedIpv4(bytes: number[]): string | null {
+  const mapped = bytes.slice(0, 10).every((byte) => byte === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+  const compatible = bytes.slice(0, 12).every((byte) => byte === 0);
+  return mapped || compatible ? bytes.slice(12).join('.') : null;
 }
 
 function isPrivateOrLocalHost(hostname: string): boolean {
@@ -125,12 +179,14 @@ function isPrivateOrLocalHost(hostname: string): boolean {
   }
 
   if (!host.includes(':')) return false;
-  if (host === '::' || host === '::1' || host.startsWith('::ffff:')) return true;
-  const firstHextet = Number.parseInt(host.split(':', 1)[0], 16);
-  return (
-    Number.isFinite(firstHextet) &&
-    ((firstHextet & 0xfe00) === 0xfc00 || (firstHextet & 0xffc0) === 0xfe80)
-  );
+  const bytes = ipv6Bytes(host);
+  if (!bytes) return true;
+  const embedded = embeddedIpv4(bytes);
+  if (embedded && isPrivateOrLocalHost(embedded)) return true;
+  if (bytes.slice(0, 15).every((byte) => byte === 0) && bytes[15] <= 1) return true;
+  if ((bytes[0] & 0xfe) === 0xfc) return true;
+  if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return true;
+  return bytes[0] === 0xff;
 }
 
 function decodedPathname(pathname: string): string | null {
@@ -147,7 +203,7 @@ function decodedPathname(pathname: string): string | null {
   }
 }
 
-export function safeMediaUrl(raw: string | undefined): string | null {
+export function safeDestinationUrl(raw: string | undefined): string | null {
   if (!safeHttpUrl(raw)) return null;
   try {
     const parsed = new URL(raw!);
@@ -159,6 +215,17 @@ export function safeMediaUrl(raw: string | undefined): string | null {
     ) {
       return null;
     }
+    return raw!;
+  } catch {
+    return null;
+  }
+}
+
+export function safeMediaUrl(raw: string | undefined): string | null {
+  const destination = safeDestinationUrl(raw);
+  if (!destination) return null;
+  try {
+    const parsed = new URL(destination);
     const path = decodedPathname(parsed.pathname);
     if (path === null) return null;
     if (
@@ -180,6 +247,29 @@ export interface FeedClient {
   unpin(id: string): Promise<void>;
 }
 
+export class FeedContractError extends Error {
+  constructor() {
+    super('Feed response is incompatible with Garden Pins.');
+    this.name = 'FeedContractError';
+  }
+}
+
+/** Accept a canonical envelope while tolerating isolated bad entries. A
+ * malformed envelope or a wholly legacy/non-Garden non-empty list is not an
+ * authoritative empty collection and must never clear a valid cache. */
+export function parsePinsEnvelope(data: unknown): PinItem[] {
+  if (typeof data !== 'object' || data === null || !Array.isArray((data as { items?: unknown }).items)) {
+    throw new FeedContractError();
+  }
+  const items = (data as { items: unknown[] }).items;
+  const pins = items.flatMap((value) => {
+    const pin = normalizePinItem(value);
+    return pin ? [pin] : [];
+  });
+  if (items.length > 0 && pins.length === 0) throw new FeedContractError();
+  return pins;
+}
+
 /** Build a client bound to a config + fetch implementation for easy testing. */
 export function createFeedClient(config: FeedConfig, fetchImpl: typeof fetch = fetch): FeedClient {
   const base = trimBase(config.baseUrl);
@@ -189,8 +279,7 @@ export function createFeedClient(config: FeedConfig, fetchImpl: typeof fetch = f
     async fetchQueue(query) {
       const response = await fetchImpl(buildQueueUrl(base, query), { headers, redirect: 'error' });
       if (!response.ok) throw new Error(`Feed fetch failed: ${response.status}`);
-      const data = (await response.json()) as { items?: unknown };
-      return Array.isArray(data.items) ? data.items.filter(isPinItem) : [];
+      return parsePinsEnvelope(await response.json());
     },
     async unpin(id) {
       const response = await fetchImpl(
@@ -304,36 +393,147 @@ export async function saveConfig(config: FeedConfig): Promise<void> {
   await browser.storage.local.remove(CONFIG_MIGRATION_KEYS);
 }
 
-function isPinMedia(value: unknown): value is PinMedia {
-  if (typeof value !== 'object' || value === null) return false;
-  const media = value as Record<string, unknown>;
-  return (
-    (media.kind === 'image' || media.kind === 'video') &&
-    isString(media.url) &&
-    (media.poster_url === undefined || isString(media.poster_url))
-  );
+const ISO_UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/;
+
+export function isCanonicalPinTimestamp(value: unknown): value is string {
+  if (!isString(value)) return false;
+  const match = ISO_UTC_TIMESTAMP.exec(value);
+  if (!match) return false;
+  const [, yearRaw, monthRaw, dayRaw, hourRaw, minuteRaw, secondRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  const second = Number(secondRaw);
+  if (year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= days[month - 1] && Number.isFinite(Date.parse(value));
 }
 
-function isPinItem(value: unknown): value is PinItem {
-  if (typeof value !== 'object' || value === null) return false;
+function normalizePinMedia(value: unknown): PinMedia | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const media = value as Record<string, unknown>;
+  if ((media.kind !== 'image' && media.kind !== 'video') || !isString(media.url)) return undefined;
+  const url = safeHttpUrl(media.url);
+  if (!url) return undefined;
+  const poster = isString(media.poster_url) ? safeHttpUrl(media.poster_url) : null;
+  return {
+    kind: media.kind,
+    url,
+    ...(poster ? { poster_url: poster } : {}),
+  };
+}
+
+function normalizePinItem(value: unknown): PinItem | null {
+  if (typeof value !== 'object' || value === null) return null;
   const pin = value as Record<string, unknown>;
-  return (
-    isString(pin.id) &&
-    isString(pin.title) &&
-    isString(pin.url) &&
-    pin.source === 'garden' &&
-    isString(pin.pinned_at) &&
-    (pin.media === undefined || isPinMedia(pin.media)) &&
-    (pin.image_url === undefined || isString(pin.image_url))
-  );
+  if (
+    !isString(pin.id) || !pin.id.trim() ||
+    !isString(pin.title) || !pin.title.trim() ||
+    !isString(pin.url) || !safeDestinationUrl(pin.url) ||
+    pin.source !== 'garden' ||
+    !isCanonicalPinTimestamp(pin.pinned_at)
+  ) {
+    return null;
+  }
+
+  const media = normalizePinMedia(pin.media);
+  const imageUrl = isString(pin.image_url) ? safeHttpUrl(pin.image_url) : null;
+  return {
+    id: pin.id.trim(),
+    title: pin.title.trim(),
+    url: pin.url.trim(),
+    source: 'garden',
+    pinned_at: pin.pinned_at,
+    ...(media ? { media } : {}),
+    ...(imageUrl ? { image_url: imageUrl } : {}),
+  };
 }
 
 export async function loadCachedItems(): Promise<PinItem[]> {
   const stored = await browser.storage.local.get(CACHE_KEY);
   const cached = stored[CACHE_KEY];
-  return Array.isArray(cached) ? cached.filter(isPinItem) : [];
+  return Array.isArray(cached)
+    ? cached.flatMap((value) => {
+        const pin = normalizePinItem(value);
+        return pin ? [pin] : [];
+      })
+    : [];
 }
 
 export async function saveCachedItems(items: PinItem[]): Promise<void> {
-  await browser.storage.local.set({ [CACHE_KEY]: items });
+  const write = () => browser.storage.local.set({ [CACHE_KEY]: items });
+  // Web Locks serialize cache ownership across React remounts and overlapping
+  // extension-page contexts; the module-level writer handles in-context order.
+  if (typeof navigator !== 'undefined' && navigator.locks) {
+    await navigator.locks.request('marktab-pins-cache-v2-write', write);
+    return;
+  }
+  await write();
+}
+
+export interface LatestCacheWriter {
+  enqueue(items: PinItem[]): Promise<void>;
+}
+
+/** Serialize cache writes and coalesce queued snapshots. browser.storage writes
+ * may resolve out of order when fired independently; this guarantees that the
+ * final durable value is the newest requested projection. */
+export function createLatestCacheWriter(
+  write: (items: PinItem[]) => Promise<void> = saveCachedItems,
+): LatestCacheWriter {
+  type Snapshot = { version: number; items: PinItem[] };
+  type Waiter = { version: number; resolve: () => void; reject: (error: unknown) => void };
+  let latest: Snapshot | null = null;
+  let running = false;
+  let nextVersion = 0;
+  const waiters: Waiter[] = [];
+
+  const settleThrough = (version: number, error?: unknown) => {
+    for (let index = waiters.length - 1; index >= 0; index -= 1) {
+      const waiter = waiters[index];
+      if (waiter.version > version) continue;
+      waiters.splice(index, 1);
+      if (error === undefined) waiter.resolve();
+      else waiter.reject(error);
+    }
+  };
+
+  const pump = async () => {
+    if (running) return;
+    running = true;
+    try {
+      while (latest !== null) {
+        const snapshot = latest;
+        latest = null;
+        try {
+          await write(snapshot.items);
+          settleThrough(snapshot.version);
+        } catch (error) {
+          // If a newer projection arrived while this write was pending, let it
+          // satisfy both versions. Otherwise fail this bounded attempt.
+          if (latest === null) settleThrough(snapshot.version, error);
+        }
+      }
+    } finally {
+      running = false;
+      // Atomic ownership handoff: an enqueue at the drain/finalizer boundary
+      // always starts a successor pump instead of stranding `latest`.
+      if (latest !== null) void pump();
+    }
+  };
+
+  return {
+    enqueue(items) {
+      const version = ++nextVersion;
+      latest = { version, items: [...items] };
+      const completion = new Promise<void>((resolve, reject) => {
+        waiters.push({ version, resolve, reject });
+      });
+      void pump();
+      return completion;
+    },
+  };
 }

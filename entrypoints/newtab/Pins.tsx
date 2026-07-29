@@ -8,15 +8,16 @@ import {
 } from 'react';
 import {
   createFeedClient,
+  createLatestCacheWriter,
   hasHostAccess,
   loadCachedItems,
   loadConfig,
   requestHostAccess,
-  safeHttpUrl,
+  safeDestinationUrl,
   safeMediaUrl,
-  saveCachedItems,
   type FeedClient,
   type FeedConfig,
+  type LatestCacheWriter,
   type PinItem,
   type PinMedia,
 } from './feed';
@@ -38,6 +39,88 @@ interface PlaybackPolicy {
   reducedMotion: boolean;
   failed: boolean;
 }
+
+interface RefreshTicket {
+  requestId: number;
+  mutationEpoch: number;
+}
+
+interface UnpinTicket {
+  item: PinItem;
+  index: number;
+  epoch: number;
+}
+
+interface Suppression {
+  epoch: number;
+  confirmed: boolean;
+}
+
+/** Own optimistic-removal suppression and refresh ordering independently from
+ * React render timing so stale requests cannot resurrect a confirmed unpin and
+ * failed mutations can invalidate in-flight projections before rollback. */
+export class PinProjection {
+  private mutationEpoch = 0;
+  private latestRefresh = 0;
+  private readonly suppressions = new Map<string, Suppression>();
+
+  beginRefresh(): RefreshTicket {
+    return { requestId: ++this.latestRefresh, mutationEpoch: this.mutationEpoch };
+  }
+
+  beginUnpin(item: PinItem, index: number): UnpinTicket {
+    const epoch = ++this.mutationEpoch;
+    this.suppressions.set(item.id, { epoch, confirmed: false });
+    return { item, index, epoch };
+  }
+
+  confirmUnpin(ticket: UnpinTicket): boolean {
+    const marker = this.suppressions.get(ticket.item.id);
+    if (!marker || marker.epoch !== ticket.epoch) return false;
+    marker.confirmed = true;
+    return true;
+  }
+
+  rollbackUnpin(ticket: UnpinTicket, current: PinItem[]): PinItem[] {
+    const marker = this.suppressions.get(ticket.item.id);
+    if (!marker || marker.epoch !== ticket.epoch) return current;
+    this.suppressions.delete(ticket.item.id);
+    // No request which observed the temporary suppression may overwrite the rollback.
+    this.latestRefresh += 1;
+    if (current.some((item) => item.id === ticket.item.id)) return current;
+    const restored = [...current];
+    restored.splice(Math.min(ticket.index, restored.length), 0, ticket.item);
+    return restored;
+  }
+
+  project(ticket: RefreshTicket, incoming: PinItem[]): PinItem[] | null {
+    if (ticket.requestId !== this.latestRefresh) return null;
+    const incomingIds = new Set(incoming.map((item) => item.id));
+    for (const [id, marker] of this.suppressions) {
+      if (marker.confirmed && ticket.mutationEpoch >= marker.epoch && !incomingIds.has(id)) {
+        this.suppressions.delete(id);
+      }
+    }
+    return incoming.filter((item) => !this.suppressions.has(item.id));
+  }
+
+  isAuthoritative(): boolean {
+    return this.suppressions.size === 0;
+  }
+}
+
+/** Persist server-confirmed projections only. Optimistic removals stay visual;
+ * the last authoritative cache survives a rejected POST or page close. */
+export function persistAuthoritativeProjection(
+  projection: PinProjection,
+  writer: LatestCacheWriter,
+  items: PinItem[],
+): Promise<void> | null {
+  return projection.isAuthoritative() ? writer.enqueue(items) : null;
+}
+
+// One owner per extension page module, rather than one per React mount.
+const sharedPinsCacheWriter = createLatestCacheWriter();
 
 export function shouldPlayVideo({ inView, reducedMotion, failed }: PlaybackPolicy): boolean {
   return inView && !reducedMotion && !failed;
@@ -172,6 +255,8 @@ function PinMediaPreview({ item }: { item: PinItem }) {
         <img
           className="pins-media-asset"
           src={media.url}
+          crossOrigin="anonymous"
+          referrerPolicy="no-referrer"
           alt=""
           loading="lazy"
           decoding="async"
@@ -184,6 +269,7 @@ function PinMediaPreview({ item }: { item: PinItem }) {
           className="pins-media-asset"
           src={videoSource(media.url, nearViewport)}
           poster={media.poster_url}
+          crossOrigin="anonymous"
           muted
           loop
           playsInline
@@ -203,8 +289,7 @@ function useFeedQueue(): FeedQueueState {
   const [availability, setAvailability] = useState<PinsAvailability>('unconfigured');
   const clientRef = useRef<FeedClient | null>(null);
   const configRef = useRef<FeedConfig | null>(null);
-  const unpinnedRef = useRef<Set<string>>(new Set());
-  const hydratedRef = useRef(false);
+  const projectionRef = useRef(new PinProjection());
   const mountedRef = useRef(false);
   const retryingRef = useRef(false);
   const enablingRef = useRef(false);
@@ -216,19 +301,11 @@ function useFeedQueue(): FeedQueueState {
     };
   }, []);
 
-  useEffect(() => {
-    if (hydratedRef.current) void saveCachedItems(items);
-  }, [items]);
-
-  const keep = useCallback(
-    (list: PinItem[]) => list.filter((item) => !unpinnedRef.current.has(item.id)),
-    [],
-  );
-
   const refresh = useCallback(
     async (isRetry: boolean) => {
       const client = clientRef.current;
       if (!client || retryingRef.current) return;
+      const ticket = projectionRef.current.beginRefresh();
       if (isRetry) {
         retryingRef.current = true;
         if (mountedRef.current) setRetrying(true);
@@ -236,8 +313,15 @@ function useFeedQueue(): FeedQueueState {
       try {
         const fresh = await client.fetchQueue();
         if (!mountedRef.current) return;
-        hydratedRef.current = true;
-        setItems(keep(fresh));
+        const projected = projectionRef.current.project(ticket, fresh);
+        if (projected === null) return;
+        setItems(projected);
+        const cacheWrite = persistAuthoritativeProjection(
+          projectionRef.current,
+          sharedPinsCacheWriter,
+          projected,
+        );
+        if (cacheWrite) void cacheWrite.catch(() => {});
         setFailed(false);
       } catch {
         if (mountedRef.current) setFailed(true);
@@ -248,7 +332,7 @@ function useFeedQueue(): FeedQueueState {
         }
       }
     },
-    [keep],
+    [],
   );
 
   const activate = useCallback(
@@ -262,8 +346,11 @@ function useFeedQueue(): FeedQueueState {
       }
       if (!mountedRef.current) return;
       if (cached.length) {
-        hydratedRef.current = true;
-        setItems(keep(cached));
+        const projected = projectionRef.current.project(
+          projectionRef.current.beginRefresh(),
+          cached,
+        );
+        if (projected) setItems(projected);
       }
       clientRef.current = createFeedClient(config);
       if (!showProgress) setAvailability('ready');
@@ -271,7 +358,7 @@ function useFeedQueue(): FeedQueueState {
       if (showProgress && mountedRef.current) setAvailability('ready');
       enablingRef.current = false;
     },
-    [keep, refresh],
+    [refresh],
   );
 
   useEffect(() => {
@@ -321,9 +408,22 @@ function useFeedQueue(): FeedQueueState {
   };
 
   const unpin = (id: string) => {
-    unpinnedRef.current.add(id);
-    setItems((previous) => previous.filter((item) => item.id !== id));
-    clientRef.current?.unpin(id).catch(() => {});
+    const index = items.findIndex((item) => item.id === id);
+    const item = items[index];
+    const client = clientRef.current;
+    if (!item || !client) return;
+    const ticket = projectionRef.current.beginUnpin(item, index);
+    setItems((previous) => previous.filter((candidate) => candidate.id !== id));
+    void client
+      .unpin(id)
+      .then(() => {
+        if (projectionRef.current.confirmUnpin(ticket)) void refresh(false);
+      })
+      .catch(() => {
+        if (!mountedRef.current) return;
+        setItems((previous) => projectionRef.current.rollbackUnpin(ticket, previous));
+        setFailed(true);
+      });
   };
 
   return {
@@ -356,7 +456,7 @@ export function PinsView({
   enable,
   retry,
 }: PinsViewProps) {
-  const safe = items.filter((item) => safeHttpUrl(item.url));
+  const safe = items.filter((item) => safeDestinationUrl(item.url));
   const hasCards = safe.length > 0;
   const needsOnboarding = availability === 'needs-access' || availability === 'enabling';
   const showOnboarding = !hasCards && needsOnboarding;

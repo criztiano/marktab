@@ -2,12 +2,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   PinsView,
+  PinProjection,
+  persistAuthoritativeProjection,
   requestPinsAccess,
   shouldPlayVideo,
   videoPreload,
   videoSource,
   type PinsAvailability,
 } from './Pins';
+import { verifyAndSavePinsConfig } from './Settings';
 import type { PinItem } from './feed';
 
 const baseItem: PinItem = {
@@ -94,6 +97,8 @@ describe('media-first title-only cards', () => {
     expect(html).toContain('class="pins-media-fallback"');
     expect(html).toContain('loading="lazy"');
     expect(html).toContain('decoding="async"');
+    expect(html).toContain('crossorigin="anonymous"');
+    expect(html).toContain('referrerPolicy="no-referrer"');
     expect(html).toContain('Garden pin');
     expect(html).toContain('aria-label="Unpin Garden pin"');
     expect(html).not.toContain('NEVER_RENDER_DESCRIPTION');
@@ -150,6 +155,70 @@ describe('video viewport policy', () => {
     expect(shouldPlayVideo({ inView: false, reducedMotion: false, failed: false })).toBe(false);
     expect(shouldPlayVideo({ inView: true, reducedMotion: true, failed: false })).toBe(false);
     expect(shouldPlayVideo({ inView: true, reducedMotion: false, failed: true })).toBe(false);
+  });
+});
+
+describe('optimistic unpin projection', () => {
+  it('rolls back a failed unpin and invalidates refreshes that observed temporary suppression', () => {
+    const projection = new PinProjection();
+    expect(projection.isAuthoritative()).toBe(true);
+    const ticket = projection.beginUnpin(baseItem, 0);
+    expect(projection.isAuthoritative()).toBe(false);
+    const overlapping = projection.beginRefresh();
+    expect(projection.project(overlapping, [baseItem])).toEqual([]);
+
+    expect(projection.rollbackUnpin(ticket, [])).toEqual([baseItem]);
+    expect(projection.isAuthoritative()).toBe(true);
+    expect(projection.project(overlapping, [])).toBeNull();
+  });
+
+  it('suppresses stale refresh results until a post-mutation response confirms absence', () => {
+    const projection = new PinProjection();
+    const stale = projection.beginRefresh();
+    const ticket = projection.beginUnpin(baseItem, 0);
+    expect(projection.confirmUnpin(ticket)).toBe(true);
+    expect(projection.isAuthoritative()).toBe(false);
+    expect(projection.project(stale, [baseItem])).toEqual([]);
+
+    const confirming = projection.beginRefresh();
+    expect(projection.project(confirming, [])).toEqual([]);
+    expect(projection.isAuthoritative()).toBe(true);
+    const later = projection.beginRefresh();
+    expect(projection.project(later, [baseItem])).toEqual([baseItem]);
+  });
+
+  it('never persists a provisional removal and resumes writes after rollback or confirmed absence', async () => {
+    const projection = new PinProjection();
+    const enqueue = vi.fn(async () => {});
+    const writer = { enqueue };
+    const ticket = projection.beginUnpin(baseItem, 0);
+
+    expect(persistAuthoritativeProjection(projection, writer, [])).toBeNull();
+    expect(enqueue).not.toHaveBeenCalled();
+
+    const restored = projection.rollbackUnpin(ticket, []);
+    await persistAuthoritativeProjection(projection, writer, restored);
+    expect(enqueue).toHaveBeenLastCalledWith([baseItem]);
+
+    const successful = projection.beginUnpin(baseItem, 0);
+    projection.confirmUnpin(successful);
+    expect(persistAuthoritativeProjection(projection, writer, [])).toBeNull();
+    const confirming = projection.beginRefresh();
+    expect(projection.project(confirming, [])).toEqual([]);
+    await persistAuthoritativeProjection(projection, writer, []);
+    expect(enqueue).toHaveBeenLastCalledWith([]);
+  });
+});
+
+describe('Settings verification ordering', () => {
+  it('does not persist or report success when feed verification rejects', async () => {
+    const incompatibility = new Error('Feed response is incompatible with Garden Pins.');
+    const fetchItems = vi.fn().mockRejectedValue(incompatibility);
+    const persist = vi.fn();
+    await expect(
+      verifyAndSavePinsConfig({ baseUrl: 'https://pins.example', token: '' }, fetchItems, persist),
+    ).rejects.toBe(incompatibility);
+    expect(persist).not.toHaveBeenCalled();
   });
 });
 

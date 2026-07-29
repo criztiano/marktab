@@ -4,11 +4,14 @@ import {
   buildHeaders,
   buildQueueUrl,
   createFeedClient,
+  createLatestCacheWriter,
   hasHostAccess,
+  isCanonicalPinTimestamp,
   loadCachedItems,
   loadConfig,
   originPattern,
   requestHostAccess,
+  safeDestinationUrl,
   safeHttpUrl,
   safeMediaUrl,
   saveCachedItems,
@@ -86,6 +89,14 @@ describe('safe URLs', () => {
     'https://example.com/image.jpg?access_token=secret',
     'https://example.com/image.jpg?Authorization=Bearer',
     'https://example.com/image.jpg?x-api-key=secret',
+    'https://example.com/image.jpg?signature=secret',
+    'https://example.com/image.jpg?session=secret',
+    'https://example.com/image.jpg?password=secret',
+    'https://example.com/image.jpg?credential=secret',
+    'https://cdn.example/image.jpg?X-Amz-Credential=user&X-Amz-Signature=secret&X-Amz-Expires=600',
+    'https://cdn.example/image.jpg?X-Goog-Credential=user&X-Goog-Signature=secret',
+    'https://cdn.example/image.jpg?Policy=p&Signature=s&Key-Pair-Id=k',
+    'https://cdn.example/image.jpg?sv=2024-01-01&se=tomorrow&sp=r&sig=secret',
     'https://eden.example/api/garden/media/abc',
     'https://eden.example/%61pi/garden/media/abc',
     'https://eden.example/remote-media?url=x',
@@ -107,8 +118,36 @@ describe('safe URLs', () => {
     'https://[::1]/image.jpg',
     'https://[fd00::1]/image.jpg',
     'https://[fe80::1]/image.jpg',
+    'https://[ff00::1]/image.jpg',
+    'https://[::7f00:1]/image.jpg',
+    'https://[::a00:1]/image.jpg',
+    'https://[::ffff:127.0.0.1]/image.jpg',
+    'https://[0:0:0:0:0:ffff:7f00:1]/image.jpg',
   ])('rejects private or local media host %s', (url) => {
     expect(safeMediaUrl(url)).toBeNull();
+  });
+
+  it.each([
+    'http://127.0.0.1/admin',
+    'http://[ff00::1]/admin',
+    'http://[::7f00:1]/admin',
+    'http://[::a00:1]/admin',
+    'https://user:pass@example.com/private',
+    'https://example.com/private?token=secret',
+    'https://example.com/private?signature=secret',
+    'https://example.com/private?session=secret',
+    'https://example.com/private?password=secret',
+    'https://example.com/private?credential=secret',
+  ])('rejects unsafe pin destination %s without tightening backend config URLs', (url) => {
+    expect(safeDestinationUrl(url)).toBeNull();
+    expect(safeHttpUrl(url)).toBe(url);
+  });
+
+  it('accepts only calendar-valid canonical UTC pin timestamps', () => {
+    expect(isCanonicalPinTimestamp('2024-02-29T12:34:56.789Z')).toBe(true);
+    for (const invalid of ['0', 'July 27, 2026', '2026-02-30T00:00:00Z', '2026-07-27T25:00:00Z']) {
+      expect(isCanonicalPinTimestamp(invalid)).toBe(false);
+    }
   });
 });
 
@@ -251,6 +290,15 @@ describe('storage (config + cache V2)', () => {
     expect(await loadCachedItems()).toEqual([item]);
   });
 
+  it('serializes cache writes across page lifecycles with a shared Web Lock', async () => {
+    const storage = stubStorage();
+    const request = vi.fn(async (_name: string, callback: () => Promise<void>) => callback());
+    vi.stubGlobal('navigator', { locks: { request } });
+    await saveCachedItems([item]);
+    expect(request).toHaveBeenCalledWith('marktab-pins-cache-v2-write', expect.any(Function));
+    expect(storage.set).toHaveBeenCalledWith({ feedPinsCacheV2: [item] });
+  });
+
   it('ignores the old queue cache and malformed/non-Garden V2 entries', async () => {
     const oldQueueItem = {
       id: 'old',
@@ -262,9 +310,91 @@ describe('storage (config + cache V2)', () => {
     };
     stubStorage({
       feedQueueCache: [oldQueueItem],
-      feedPinsCacheV2: [item, oldQueueItem, { id: 'broken' }],
+      feedPinsCacheV2: [
+        item,
+        oldQueueItem,
+        { id: 'broken' },
+        { ...item, id: '   ' },
+        { ...item, title: '' },
+        { ...item, url: 'javascript:alert(1)' },
+        { ...item, url: 'http://127.0.0.1/admin' },
+        { ...item, url: 'https://user:pass@example.com/private' },
+        { ...item, pinned_at: 'not-a-date' },
+        { ...item, pinned_at: '0' },
+        { ...item, pinned_at: '2026-02-30T00:00:00Z' },
+      ],
     });
     expect(await loadCachedItems()).toEqual([item]);
+  });
+
+  it('retains a core-valid cached pin while discarding malformed optional media', async () => {
+    stubStorage({
+      feedPinsCacheV2: [{ ...item, media: { kind: 'image', url: 'not a url' }, image_url: 'not a url' }],
+    });
+    const { media: _media, ...core } = item;
+    expect(await loadCachedItems()).toEqual([core]);
+  });
+});
+
+describe('latest cache writer', () => {
+  it('serializes writes and leaves the newest queued projection durable', async () => {
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const snapshots: string[][] = [];
+    const write = vi.fn(async (items: PinItem[]) => {
+      snapshots.push(items.map((candidate) => candidate.id));
+      if (snapshots.length === 1) await firstBlocked;
+    });
+    const writer = createLatestCacheWriter(write);
+    const older = writer.enqueue([{ ...item, id: 'older' }]);
+    const newest = writer.enqueue([{ ...item, id: 'newest' }]);
+
+    expect(snapshots).toEqual([['older']]);
+    releaseFirst();
+    await Promise.all([older, newest]);
+    expect(snapshots).toEqual([['older'], ['newest']]);
+  });
+
+  it('continues to the newest queued projection when its predecessor write fails', async () => {
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const durable: string[][] = [];
+    let attempt = 0;
+    const writer = createLatestCacheWriter(async (items) => {
+      attempt += 1;
+      if (attempt === 1) {
+        await firstBlocked;
+        throw new Error('older write failed');
+      }
+      durable.push(items.map((candidate) => candidate.id));
+    });
+    const older = writer.enqueue([{ ...item, id: 'older' }]);
+    const newest = writer.enqueue([{ ...item, id: 'newest' }]);
+
+    releaseFirst();
+    await Promise.all([older, newest]);
+    expect(durable).toEqual([['newest']]);
+  });
+
+  it('restarts cleanly when a newer enqueue arrives from a rejected completion boundary', async () => {
+    const attempts: string[][] = [];
+    let first = true;
+    const writer = createLatestCacheWriter(async (items) => {
+      attempts.push(items.map((candidate) => candidate.id));
+      if (first) {
+        first = false;
+        throw new Error('first boundary failure');
+      }
+    });
+
+    const older = writer.enqueue([{ ...item, id: 'older' }]);
+    const newest = older.catch(() => writer.enqueue([{ ...item, id: 'newest' }]));
+    await newest;
+    expect(attempts).toEqual([['older'], ['newest']]);
   });
 });
 
@@ -285,14 +415,54 @@ describe('createFeedClient', () => {
     expect(init.method).toBeUndefined();
   });
 
-  it('returns [] when the payload has no items and throws on non-OK reads', async () => {
-    const emptyFetch = vi.fn().mockResolvedValue(jsonResponse({}));
+  it('returns [] for a canonical empty envelope and throws on non-OK reads', async () => {
+    const emptyFetch = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
     await expect(createFeedClient(config, emptyFetch).fetchQueue()).resolves.toEqual([]);
 
     const failedFetch = vi.fn().mockResolvedValue(jsonResponse(null, false, 500));
     await expect(createFeedClient(config, failedFetch).fetchQueue()).rejects.toThrow(
       'Feed fetch failed: 500',
     );
+  });
+
+  it.each([
+    {},
+    { items: [{ id: 'legacy', source: 'triage', status: 'queued' }] },
+    { items: 'not-an-array' },
+    { items: [{ ...item, id: '' }] },
+    { items: [{ ...item, title: '   ' }] },
+    { items: [{ ...item, url: '' }] },
+    { items: [{ ...item, url: 'javascript:alert(1)' }] },
+    { items: [{ ...item, url: 'http://127.0.0.1/admin' }] },
+    { items: [{ ...item, url: 'https://user:pass@example.com/private' }] },
+    { items: [{ ...item, pinned_at: 'not-a-date' }] },
+    { items: [{ ...item, pinned_at: '0' }] },
+    { items: [{ ...item, pinned_at: 'July 27, 2026' }] },
+    { items: [{ ...item, pinned_at: '2026-02-30T00:00:00Z' }] },
+  ])('rejects an incompatible non-canonical feed without treating it as empty %#', async (payload) => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(payload));
+    await expect(createFeedClient(config, fetchImpl).fetchQueue()).rejects.toThrow(
+      'Feed response is incompatible with Garden Pins.',
+    );
+  });
+
+  it.each([
+    { kind: 'bogus', url: 'https://cdn.example/x' },
+    { kind: 'image', url: 42 },
+    { kind: 'image', url: '' },
+    { kind: 'image', url: 'not a url' },
+  ])('keeps a canonical pin and discards malformed optional media %#', async (media) => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ items: [{ ...item, media }] }));
+    const [pin] = await createFeedClient(config, fetchImpl).fetchQueue();
+    expect(pin.id).toBe(item.id);
+    expect(pin.media).toBeUndefined();
+  });
+
+  it('keeps valid media while discarding a malformed poster alias', async () => {
+    const media = { kind: 'video', url: 'https://cdn.example/x.mp4', poster_url: 'not a url' };
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ items: [{ ...item, media }] }));
+    const [pin] = await createFeedClient(config, fetchImpl).fetchQueue();
+    expect(pin.media).toEqual({ kind: 'video', url: 'https://cdn.example/x.mp4' });
   });
 
   it('POSTs only an explicit unpin to the compatibility dismiss endpoint', async () => {
