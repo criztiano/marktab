@@ -153,6 +153,153 @@ mark {
   margin-top: 48px;
 }
 
+/* Bookmarks take one column, "Open tabs" the other two. Stacked on narrow
+   windows, and the tabs step aside while searching. */
+.layout[data-searching] > .tabs {
+  display: none;
+}
+
+@media (min-width: 861px) {
+  .layout:not([data-searching]):has(> .tabs[data-open]) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+    grid-template-areas: 'bookmarks tabs';
+    column-gap: 40px;
+    align-items: start;
+  }
+}
+
+.layout > .tabs {
+  grid-area: tabs;
+}
+
+.layout > .bookmarks {
+  grid-area: bookmarks;
+}
+
+.tabs[data-open] {
+  margin-bottom: 56px;
+}
+
+.tabs-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.tabs-count {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.tabs-empty {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.tabs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The tinted bar behind each row shows its memory next to the heaviest tab */
+.tabs-row {
+  display: flex;
+  align-items: center;
+  margin: 0 -10px;
+  border-radius: 6px;
+  background-image: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--accent) 10%, transparent) calc(var(--share, 0) * 100%),
+    transparent 0
+  );
+}
+
+.tabs-row:hover {
+  background-color: var(--hover);
+}
+
+.tabs-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tabs-open img {
+  flex-shrink: 0;
+  border-radius: 3px;
+}
+
+.tabs-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabs-mem {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabs-close {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.tabs-row:hover .tabs-close,
+.tabs-close:focus-visible {
+  opacity: 1;
+}
+
+.tabs-close:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.tabs-open:focus-visible,
+.tabs-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tabs-close {
+    transition: none;
+  }
+}
+
 /* "Pins" — horizontal row of cards from the optional, user-configured feed.
    Stays mounted at zero height when empty; reveals via a grid-rows height
    animation (no layout jump) followed by a staggered card blur-fade. */

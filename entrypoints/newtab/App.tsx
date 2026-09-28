@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Pins from './Pins';
 import Settings from './Settings';
+import Tabs from './Tabs';
+import { loadShownFolders } from './local-config';
 
 // Minimal local type — avoids depending on polyfill type exports.
 interface BookmarkNode {
@@ -57,6 +59,13 @@ function flatten(nodes: BookmarkNode[]): Section[] {
   return sections;
 }
 
+/** Keep only the configured folders; if none of them exist, show everything. */
+function pickFolders(sections: Section[], shown: Set<string> | null): Section[] {
+  if (!shown) return sections;
+  const picked = sections.filter((s) => shown.has(s.path.toLowerCase()));
+  return picked.length > 0 ? picked : sections;
+}
+
 export default function App() {
   const [sections, setSections] = useState<Section[]>([]);
   const [query, setQuery] = useState('');
@@ -65,8 +74,11 @@ export default function App() {
   const columnsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const shown = loadShownFolders(); // read once, before the first paint of sections
     const load = () =>
-      browser.bookmarks.getTree().then((tree) => setSections(flatten(tree as BookmarkNode[])));
+      Promise.all([browser.bookmarks.getTree(), shown]).then(([tree, folders]) =>
+        setSections(pickFolders(flatten(tree as BookmarkNode[]), folders)),
+      );
     load();
     // Stay in sync with Chrome's bookmarks while the tab is open.
     const events = [
@@ -130,7 +142,8 @@ export default function App() {
       }
       return;
     }
-    if (!inSearch && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const pressesButton = e.key === ' ' && e.target instanceof HTMLButtonElement;
+    if (!inSearch && !pressesButton && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
       input?.focus(); // keydown's default action then types into the input
     }
   };
@@ -156,25 +169,31 @@ export default function App() {
         </p>
       </div>
       {!q && <Pins key={reloadKey} />}
-      {filtered.length === 0 && (
-        <p className="empty">{total === 0 ? 'No bookmarks yet.' : 'Nothing matches.'}</p>
-      )}
-      <div className="columns" ref={columnsRef}>
-        {filtered.map((section) => (
-          <section key={section.id} className="column">
-            <h2 className="folder">{section.path}</h2>
-            <ul className="list">
-              {section.items.map((item) => (
-                <li key={item.id}>
-                  <a href={item.url} title={`${item.title}\n${item.url}`}>
-                    <img src={faviconUrl(item.url)} alt="" width={16} height={16} loading="lazy" />
-                    <span>{highlight(item.title, q)}</span>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ))}
+      {/* Tabs stays mounted while searching so its readings survive a quick search. */}
+      <div className="layout" data-searching={q ? 'true' : undefined}>
+        <Tabs />
+        <div className="bookmarks">
+          {filtered.length === 0 && (
+            <p className="empty">{total === 0 ? 'No bookmarks yet.' : 'Nothing matches.'}</p>
+          )}
+          <div className="columns" ref={columnsRef}>
+            {filtered.map((section) => (
+              <section key={section.id} className="column">
+                <h2 className="folder">{section.path}</h2>
+                <ul className="list">
+                  {section.items.map((item) => (
+                    <li key={item.id}>
+                      <a href={item.url} title={`${item.title}\n${item.url}`}>
+                        <img src={faviconUrl(item.url)} alt="" width={16} height={16} loading="lazy" />
+                        <span>{highlight(item.title, q)}</span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        </div>
       </div>
     </main>
   );
