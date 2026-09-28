@@ -31,6 +31,8 @@ For a private unpacked build with Pins preconfigured, create `~/.config/marktab/
 { "baseUrl": "https://pins.example", "apiKey": "your-private-key" }
 ```
 
+Add an optional `"folders": ["Fun"]` list to show only those bookmark folders (all folders when absent).
+
 Then run `npm run build:local`. It builds the same generic extension and writes only a generated `marktab-local.json` into `.output/chrome-mv3/`; it does **not** add required `host_permissions`. Both generic and local manifests retain only the optional per-host permission patterns. On the first new or upgraded local launch, click **Enable Pins** in the Pins row and approve Chrome's one-time grant for the configured host; Pins loads immediately without a page reload. The generated config contains the key: keep the output private and never commit or publish it.
 
 ### Other commands
@@ -49,6 +51,7 @@ npm run compile         # typecheck only
 - Bookmark events (`onCreated`, `onRemoved`, `onChanged`, `onMoved`) re-render the list live.
 - Favicons come from Chrome's local cache via the `_favicon/` endpoint (`favicon` permission) — no external requests for core bookmark browsing.
 - Search box filters by title/URL; Enter opens the first match.
+- **Open tabs by memory** (optional) — the 12 open web pages holding the most memory, each with a close button. Click **Show tabs** once to grant page access. Readings are each page's JavaScript memory (`performance.memory`): good for ranking, lower than Task Manager, and refreshed by Chrome at most every 20 minutes per process.
 - **Pins** (optional) — see [below](#pins-optional-feed). Off until you point it at a server; otherwise the new tab is just your bookmarks.
 
 ### Pins (optional feed)
@@ -112,7 +115,7 @@ wxt.config.ts         # manifest config
 
 ## Privacy
 
-Core bookmark browsing stays fully local: bookmarks are read via `chrome.bookmarks` and favicons come from Chrome's own cache — no network requests, and the extension requests **no host access at install**. Optional **Pins** traffic begins only after you configure and grant one feed host. Cards may then load the direct public image/video URLs returned by that feed; protected Garden media-proxy URLs are suppressed. Leave Pins unconfigured and Marktab never touches the network.
+Core bookmark browsing stays fully local: bookmarks are read via `chrome.bookmarks` and favicons come from Chrome's own cache — no network requests, and the extension requests **no host access at install**. Optional **Pins** traffic begins only after you configure and grant one feed host. Cards may then load the direct public image/video URLs returned by that feed; protected Garden media-proxy URLs are suppressed. Leave Pins unconfigured and Marktab never touches the network. The optional **Open tabs** panel asks for access to all web pages only when you click **Show tabs**; it reads a memory figure from each page and makes no network requests.
 
 ## License
 

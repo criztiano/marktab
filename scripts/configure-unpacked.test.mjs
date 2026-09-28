@@ -22,6 +22,16 @@ describe('normaliseLocalConfig', () => {
     );
   });
 
+  it('keeps an optional list of shown bookmark folders', () => {
+    const base = { baseUrl: 'https://pins.example', apiKey: 'placeholder' };
+    expect(normaliseLocalConfig({ ...base, folders: [' Fun ', '', 7, 'Reading'] }).folders).toEqual([
+      'Fun',
+      'Reading',
+    ]);
+    expect(normaliseLocalConfig({ ...base, folders: [] })).not.toHaveProperty('folders');
+    expect(normaliseLocalConfig({ ...base, folders: 'Fun' })).not.toHaveProperty('folders');
+  });
+
   it.each([
     {},
     { baseUrl: 'http://pins.example', token: 'placeholder' },

@@ -11,11 +11,13 @@ export default defineConfig({
       'bookmarks', // read the bookmark tree
       'favicon', // use Chrome's local favicon cache (no external requests)
       'storage', // persist the Pins feed base URL + token (see entrypoints/newtab/feed.ts)
+      'scripting', // read each open page's memory for the "Open tabs" panel (see entrypoints/newtab/tab-usage.ts)
     ],
     // The "Pins" feed talks to whatever host the user configures. Access is
     // optional and granted per-host at runtime (Settings → Save), so a fresh
     // install requests nothing and no host is baked into the extension. https for
-    // real hosts; plain http only for localhost (dev).
-    optional_host_permissions: ['https://*/*', 'http://localhost/*'],
+    // real hosts; plain http only for localhost (dev). The "Open tabs" panel asks
+    // for every https/http page at runtime (its "Show tabs" button), never at install.
+    optional_host_permissions: ['https://*/*', 'http://*/*', 'http://localhost/*'],
   },
 });

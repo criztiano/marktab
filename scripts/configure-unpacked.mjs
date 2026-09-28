@@ -26,7 +26,11 @@ export function normaliseLocalConfig(input) {
   if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.hostname.includes('*')) {
     throw new Error('Local config baseUrl must use HTTPS and a specific host.');
   }
-  return { baseUrl, token };
+  // Optional: bookmark folder names the new tab shows (all folders when absent).
+  const folders = Array.isArray(input.folders)
+    ? input.folders.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim())
+    : [];
+  return folders.length > 0 ? { baseUrl, token, folders } : { baseUrl, token };
 }
 
 export async function configureUnpacked({

@@ -1,5 +1,5 @@
 /** Version embedded in this new-tab bundle. Keep it in step with package.json. */
-export const BUNDLE_VERSION = '0.1.2';
+export const BUNDLE_VERSION = '0.2.0';
 
 interface RuntimeVersionApi {
   getManifest(): { version: string };

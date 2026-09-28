@@ -1,6 +1,8 @@
 // Data layer for the optional "Pins" feed — Marktab's only network client.
 // It stays dormant until the user configures and grants one backend host.
 
+import { readBundledJson } from './local-config';
+
 export interface PinMedia {
   kind: 'image' | 'video';
   url: string;
@@ -37,7 +39,6 @@ const DEFAULT_LIMIT = 12;
 const MAX_LIMIT = 50;
 const LEGACY_CACHE_KEY = 'feedQueueCache';
 const CACHE_KEY = 'feedPinsCacheV2';
-const LOCAL_CONFIG_FILE = 'marktab-local.json';
 const CONFIG_MIGRATION_KEYS = [LEGACY_CACHE_KEY, CACHE_KEY, 'edenBaseUrl', 'edenToken'];
 
 /** Strip a trailing slash so paths join without doubling up. */
@@ -337,15 +338,7 @@ function normaliseBundledConfig(value: unknown): FeedConfig | null {
 }
 
 async function loadBundledConfig(): Promise<FeedConfig | null> {
-  try {
-    const url = new URL(LOCAL_CONFIG_FILE, browser.runtime.getURL('/')).href;
-    const response = await fetch(url, { cache: 'no-store' });
-    if (!response.ok) return null;
-    return normaliseBundledConfig(await response.json());
-  } catch {
-    // Generic public builds intentionally have no bundled local config.
-    return null;
-  }
+  return normaliseBundledConfig(await readBundledJson());
 }
 
 async function persistMigratedConfig(config: FeedConfig): Promise<void> {
