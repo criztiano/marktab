@@ -4,6 +4,8 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
   type RefObject,
 } from 'react';
 import {
@@ -21,6 +23,16 @@ import {
   type PinItem,
   type PinMedia,
 } from './feed';
+import {
+  createNote,
+  loadNotes,
+  noteSize,
+  NOTE_COLORS,
+  saveNotes,
+  watchNotes,
+  type NoteColor,
+  type PinNote,
+} from './notes';
 
 export type PinsAvailability = 'unconfigured' | 'needs-access' | 'enabling' | 'ready';
 
@@ -437,6 +449,147 @@ function useFeedQueue(): FeedQueueState {
   };
 }
 
+/** Local notes: optimistic in memory, persisted to storage, synced across tabs. */
+function useNotes() {
+  const [notes, setNotes] = useState<PinNote[]>([]);
+  const notesRef = useRef<PinNote[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    const apply = (next: PinNote[]) => {
+      notesRef.current = next;
+      if (alive) setNotes(next);
+    };
+    void loadNotes().then(apply, () => {});
+    const stop = watchNotes(apply);
+    return () => {
+      alive = false;
+      stop();
+    };
+  }, []);
+
+  const commit = (next: PinNote[]) => {
+    notesRef.current = next;
+    setNotes(next);
+    void saveNotes(next).catch(() => {});
+  };
+
+  return {
+    notes,
+    addNote: (text: string, by: string) => {
+      const note = createNote(text, by);
+      if (note) commit([note, ...notesRef.current]);
+    },
+    removeNote: (id: string) => commit(notesRef.current.filter((note) => note.id !== id)),
+    recolorNote: (id: string, color: NoteColor) =>
+      commit(notesRef.current.map((note) => (note.id === id ? { ...note, color } : note))),
+  };
+}
+
+const NOTE_COLOR_NAMES = Object.keys(NOTE_COLORS) as NoteColor[];
+
+function NoteCard({
+  note,
+  index,
+  onRemove,
+  onRecolor,
+}: {
+  note: PinNote;
+  index: number;
+  onRemove: () => void;
+  onRecolor: (color: NoteColor) => void;
+}) {
+  const color = note.color ?? 'lime';
+  const style = { '--i': index, '--note-mark': NOTE_COLORS[color] } as CSSProperties;
+  const label = note.by ? `quote by ${note.by}` : 'note';
+  return (
+    <li className="pins-card pins-note" data-size={noteSize(note.text)} style={style}>
+      <figure className="pins-note-body">
+        {note.by ? (
+          <>
+            <blockquote className="pins-note-text">
+              <mark>{note.text}</mark>
+            </blockquote>
+            <figcaption className="pins-note-by">— {note.by}</figcaption>
+          </>
+        ) : (
+          <p className="pins-note-text">
+            <mark>{note.text}</mark>
+          </p>
+        )}
+      </figure>
+      <span className="pins-note-colors" role="group" aria-label="Highlighter colour">
+        {NOTE_COLOR_NAMES.map((name) => (
+          <button
+            key={name}
+            type="button"
+            className="pins-note-dot"
+            style={{ background: NOTE_COLORS[name] }}
+            aria-label={name}
+            aria-pressed={name === color}
+            onClick={() => onRecolor(name)}
+          />
+        ))}
+      </span>
+      <button type="button" className="pins-dismiss" aria-label={`Remove ${label}: ${note.text}`} onClick={onRemove}>
+        ×
+      </button>
+    </li>
+  );
+}
+
+function NoteComposer({ onSave, onClose }: { onSave: (text: string, by: string) => void; onClose: () => void }) {
+  const [text, setText] = useState('');
+  const [by, setBy] = useState('');
+
+  const submit = (event?: FormEvent) => {
+    event?.preventDefault();
+    if (!text.trim()) return;
+    onSave(text, by);
+    onClose();
+  };
+
+  // Keep Escape and typing inside the composer instead of the page search.
+  const onKeyDown = (event: KeyboardEvent<HTMLFormElement>) => {
+    event.stopPropagation();
+    if (event.key === 'Escape') onClose();
+    if (event.key === 'Enter' && !event.shiftKey && event.target instanceof HTMLTextAreaElement) submit(event);
+  };
+
+  return (
+    <li className="pins-card pins-note pins-note--draft" data-size={noteSize(text)}>
+      <form className="pins-note-body" onSubmit={submit} onKeyDown={onKeyDown}>
+        <textarea
+          className="pins-note-text pins-note-input"
+          aria-label="Note or quote"
+          placeholder="A note or quote…"
+          maxLength={280}
+          rows={2}
+          autoFocus
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+        />
+        <input
+          className="pins-note-by pins-note-input"
+          aria-label="Who said it (optional)"
+          placeholder="— who said it (optional)"
+          maxLength={80}
+          value={by}
+          onChange={(event) => setBy(event.target.value)}
+        />
+        <span className="pins-note-actions">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" disabled={!text.trim()}>
+            Add
+          </button>
+        </span>
+      </form>
+    </li>
+  );
+}
+
 interface PinsViewProps {
   items: PinItem[];
   failed: boolean;
@@ -445,7 +598,13 @@ interface PinsViewProps {
   unpin: (id: string) => void;
   enable: () => void;
   retry: () => void;
+  notes?: PinNote[];
+  addNote?: (text: string, by: string) => void;
+  removeNote?: (id: string) => void;
+  recolorNote?: (id: string, color: NoteColor) => void;
 }
+
+const noop = () => {};
 
 export function PinsView({
   items,
@@ -455,12 +614,18 @@ export function PinsView({
   unpin,
   enable,
   retry,
+  notes = [],
+  addNote = noop,
+  removeNote = noop,
+  recolorNote = noop,
 }: PinsViewProps) {
+  const [composing, setComposing] = useState(false);
   const safe = items.filter((item) => safeDestinationUrl(item.url));
   const hasCards = safe.length > 0;
+  const hasRow = hasCards || notes.length > 0 || composing;
   const needsOnboarding = availability === 'needs-access' || availability === 'enabling';
   const showOnboarding = !hasCards && needsOnboarding;
-  const isOpen = hasCards || failed || showOnboarding;
+  const isOpen = hasRow || failed || showOnboarding;
 
   return (
     <section className="pins" aria-label="Pins" aria-hidden={!isOpen} data-open={isOpen}>
@@ -468,11 +633,31 @@ export function PinsView({
         <div className="pins-clip">
           {isOpen && (
             <>
-              <h2 className="pins-title">Pins</h2>
-              {hasCards && (
+              <div className="pins-head">
+                <h2 className="pins-title">Pins</h2>
+                <button
+                  type="button"
+                  className="pins-add"
+                  onClick={() => setComposing(true)}
+                  disabled={composing}
+                >
+                  + Note
+                </button>
+              </div>
+              {hasRow && (
                 <ul className="pins-row">
+                  {composing && <NoteComposer onSave={addNote} onClose={() => setComposing(false)} />}
+                  {notes.map((note, index) => (
+                    <NoteCard
+                      key={note.id}
+                      note={note}
+                      index={index}
+                      onRemove={() => removeNote(note.id)}
+                      onRecolor={(color) => recolorNote(note.id, color)}
+                    />
+                  ))}
                   {safe.map((item, index) => {
-                    const style = { '--i': index } as CSSProperties;
+                    const style = { '--i': notes.length + index } as CSSProperties;
                     return (
                       <li key={item.id} className="pins-card" style={style}>
                         <a className="pins-link" href={item.url} title={item.title}>
@@ -517,5 +702,5 @@ export function PinsView({
 }
 
 export default function Pins() {
-  return <PinsView {...useFeedQueue()} />;
+  return <PinsView {...useFeedQueue()} {...useNotes()} />;
 }
