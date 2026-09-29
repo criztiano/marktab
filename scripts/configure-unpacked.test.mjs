@@ -32,6 +32,14 @@ describe('normaliseLocalConfig', () => {
     expect(normaliseLocalConfig({ ...base, folders: 'Fun' })).not.toHaveProperty('folders');
   });
 
+  it('keeps optional starter notes and drops blank ones', () => {
+    const base = { baseUrl: 'https://pins.example', apiKey: 'placeholder' };
+    expect(
+      normaliseLocalConfig({ ...base, notes: [' Done is NOT Good ', '', 4, { text: 'Q', by: ' Me ' }, { text: ' ' }] }).notes,
+    ).toEqual(['Done is NOT Good', { text: 'Q', by: 'Me' }]);
+    expect(normaliseLocalConfig({ ...base, notes: [] })).not.toHaveProperty('notes');
+  });
+
   it.each([
     {},
     { baseUrl: 'http://pins.example', token: 'placeholder' },
