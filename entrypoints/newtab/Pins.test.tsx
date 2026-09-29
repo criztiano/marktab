@@ -231,3 +231,35 @@ describe('requestPinsAccess', () => {
     await expect(pending).resolves.toBe(false);
   });
 });
+
+describe('PinsView notes', () => {
+  it('opens for notes alone, with a big highlighted line and attribution', () => {
+    const html = renderToStaticMarkup(
+      <PinsView
+        items={[]}
+        failed={false}
+        retrying={false}
+        availability="unconfigured"
+        unpin={vi.fn()}
+        enable={vi.fn()}
+        retry={vi.fn()}
+        notes={[
+          { id: 'n1', text: 'Done is NOT Good' },
+          { id: 'n2', text: 'Less, but better', by: 'Dieter Rams', color: 'pink' },
+        ]}
+      />,
+    );
+    expect(html).toContain('data-open="true"');
+    expect(html).toContain('<p class="pins-note-text"><mark>Done is NOT Good</mark></p>');
+    expect(html).toContain('data-size="lg"');
+    expect(html).toContain('<blockquote class="pins-note-text"><mark>Less, but better</mark></blockquote>');
+    expect(html).toMatch(/pins-note-by">— (<!-- -->)?Dieter Rams/);
+    expect(html).toContain('aria-label="Remove note: Done is NOT Good"');
+    expect(html).toContain('+ Note');
+    expect(html).toContain('--note-mark:#ccff3d');
+    expect(html).toContain('--note-mark:#ff7ad9');
+    expect(html.match(/class="pins-note-dot"/g)).toHaveLength(10);
+    expect(html).toContain('aria-label="pink" aria-pressed="true"');
+  });
+});
+

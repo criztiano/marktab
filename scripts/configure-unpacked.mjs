@@ -30,7 +30,22 @@ export function normaliseLocalConfig(input) {
   const folders = Array.isArray(input.folders)
     ? input.folders.filter((name) => typeof name === 'string' && name.trim()).map((name) => name.trim())
     : [];
-  return folders.length > 0 ? { baseUrl, token, folders } : { baseUrl, token };
+  // Optional: starter notes for the Pins row — strings or { text, by }. They
+  // seed local storage once; after that the new tab owns them.
+  const notes = Array.isArray(input.notes)
+    ? input.notes.flatMap((note) => {
+        if (typeof note === 'string') return note.trim() ? [note.trim()] : [];
+        if (!note || typeof note !== 'object' || typeof note.text !== 'string' || !note.text.trim()) return [];
+        const by = typeof note.by === 'string' ? note.by.trim() : '';
+        return [by ? { text: note.text.trim(), by } : { text: note.text.trim() }];
+      })
+    : [];
+  return {
+    baseUrl,
+    token,
+    ...(folders.length > 0 ? { folders } : {}),
+    ...(notes.length > 0 ? { notes } : {}),
+  };
 }
 
 export async function configureUnpacked({
