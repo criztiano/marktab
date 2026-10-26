@@ -345,10 +345,14 @@ export interface GardenSearchItem {
 
 export interface ReviewItem {
   id: string;
+  /** The author, e.g. "@handle". */
   title: string;
+  /** The post text (up to ~280 characters). */
   summary?: string;
   kind?: string;
   created_at: string;
+  /** Direct public media only; protected/credentialed URLs are dropped. */
+  media?: PinMedia;
 }
 
 export interface ReviewSnapshot {
@@ -438,13 +442,27 @@ function normalizeReviewItem(value: unknown): ReviewItem | null {
   }
   const summary = optionalText(item.summary);
   const kind = optionalText(item.kind);
+  const media = normalizeReviewMedia(item.media);
   return {
     id: item.id.trim(),
     title: item.title.trim(),
     created_at: item.created_at,
     ...(summary ? { summary } : {}),
     ...(kind ? { kind } : {}),
+    ...(media ? { media } : {}),
   };
+}
+
+/** Same shape as PinMedia, but checked with safeMediaUrl up front: media
+ * elements cannot send the feed token, so only direct public URLs survive. */
+function normalizeReviewMedia(value: unknown): PinMedia | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const media = value as Record<string, unknown>;
+  if ((media.kind !== 'image' && media.kind !== 'video') || !isString(media.url)) return undefined;
+  const url = safeMediaUrl(media.url.trim());
+  if (!url) return undefined;
+  const poster = media.kind === 'video' && isString(media.poster_url) ? safeMediaUrl(media.poster_url.trim()) : null;
+  return { kind: media.kind, url, ...(poster ? { poster_url: poster } : {}) };
 }
 
 /** `{ total, items }`; `total` never reads lower than the rows we show. */

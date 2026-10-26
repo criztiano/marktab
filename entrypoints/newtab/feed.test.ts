@@ -591,6 +591,28 @@ describe('Review', () => {
     expect(() => parseReviewEnvelope(null)).toThrow(FeedContractError);
   });
 
+  it('keeps direct public media and drops protected or malformed media', () => {
+    const parse = (media: unknown) => parseReviewEnvelope({ items: [{ ...post, media }] }).items[0].media;
+    expect(parse({ kind: 'image', url: 'https://pbs.twimg.com/media/a.jpg' })).toEqual({
+      kind: 'image',
+      url: 'https://pbs.twimg.com/media/a.jpg',
+    });
+    expect(
+      parse({
+        kind: 'video',
+        url: 'https://video.twimg.com/a.mp4',
+        poster_url: 'https://pbs.twimg.com/poster.jpg',
+      }),
+    ).toEqual({ kind: 'video', url: 'https://video.twimg.com/a.mp4', poster_url: 'https://pbs.twimg.com/poster.jpg' });
+    expect(
+      parse({ kind: 'video', url: 'https://video.twimg.com/a.mp4', poster_url: 'https://eden.test/api/garden/media/p' }),
+    ).toEqual({ kind: 'video', url: 'https://video.twimg.com/a.mp4' });
+    expect(parse({ kind: 'image', url: 'https://eden.test/api/garden/media/x' })).toBeUndefined();
+    expect(parse({ kind: 'image', url: 'https://cdn.example/a.jpg?token=secret' })).toBeUndefined();
+    expect(parse({ kind: 'gif', url: 'https://pbs.twimg.com/media/a.gif' })).toBeUndefined();
+    expect(parse('https://pbs.twimg.com/media/a.jpg')).toBeUndefined();
+  });
+
   it('fetches with auth headers and surfaces a 404 as missing', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ total: 1, items: [post] }));
     await expect(fetchReview(config, undefined, fetchImpl)).resolves.toEqual({ total: 1, items: [post] });

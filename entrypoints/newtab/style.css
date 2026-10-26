@@ -53,6 +53,8 @@
   /* Sizes */
   --target: 24px; /* smallest hit area */
   --control: 32px; /* buttons */
+  --control-sm: 24px; /* compact block controls */
+  --row-compact: 28px; /* one-line tab rows */
   --search-height: 60px;
   --card-width: 92px;
   --card-height: 84px;
@@ -154,6 +156,12 @@ body {
   border: 0;
   border-radius: var(--r-full);
   cursor: pointer;
+}
+
+.text-button--small {
+  height: var(--control-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
 }
 
 .text-button--primary {
@@ -407,7 +415,45 @@ mark {
 }
 
 .tabs-toggle {
-  margin: var(--space-2) 0 0 calc(-1 * var(--space-3));
+  margin: var(--space-1) 0 0 calc(-1 * var(--space-2));
+}
+
+/* Open tabs: a tighter block of one-line rows */
+.block--compact {
+  padding: var(--space-2) var(--space-4) var(--space-3);
+}
+
+.block--compact .block-head {
+  min-height: var(--control-sm);
+  margin-bottom: 0;
+}
+
+.rows--compact .row-link {
+  gap: var(--space-2);
+  min-height: var(--row-compact);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.rows--compact .row-title {
+  line-height: 1.25;
+}
+
+.rows--compact .row-action {
+  width: var(--control-sm);
+  height: var(--control-sm);
+  margin-right: var(--space-1);
+}
+
+.rows--compact .row-action::before {
+  inset: calc(-1 * var(--space-1)) calc(-1 * var(--space-1)) calc(-1 * var(--space-1)) 0;
+}
+
+.row-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-xs);
 }
 
 /* ---------- Rows: one anatomy for results, Pins, Review and tabs ----------
@@ -470,6 +516,18 @@ mark {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.row-title--clamp3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.row-link--top {
+  align-items: flex-start;
 }
 
 .row-title--clamp {
@@ -609,7 +667,7 @@ mark {
   background-image: linear-gradient(var(--memory-bar), var(--memory-bar));
   background-repeat: no-repeat;
   background-position: var(--space-2) 100%;
-  background-size: calc(var(--share, 0) * (100% - 2 * var(--space-2))) 2px;
+  background-size: calc(var(--share, 0) * (100% - 2 * var(--space-2))) 1px;
 }
 
 /* Shown only when a first load takes longer than ~300 ms; static, no shimmer */

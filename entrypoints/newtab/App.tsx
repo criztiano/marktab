@@ -209,8 +209,8 @@ export default function App() {
             <Pins key={reloadKey} />
           </div>
           <div className="dashboard-side">
-            <Review key={reloadKey} source={source} />
             <Tabs />
+            <Review key={reloadKey} source={source} />
           </div>
         </div>
       </div>

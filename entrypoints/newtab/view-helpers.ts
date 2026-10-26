@@ -16,27 +16,19 @@ export function displayHost(url: string): string {
   }
 }
 
-const AGE_STEPS: [Intl.RelativeTimeFormatUnit, number][] = [
-  ['minute', 60],
-  ['hour', 60],
-  ['day', 24],
-  ['week', 7],
-  ['month', 4.35],
-  ['year', 12],
-];
-
-/** "3 hr. ago", "yesterday" — through Intl, in the reader's locale. */
-export function formatAge(iso: string, now = Date.now(), locale?: string): string {
-  const format = new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'short' });
-  let value = Math.min(0, (Date.parse(iso) - now) / 60_000); // minutes; never "in 2 min."
-  let unit: Intl.RelativeTimeFormatUnit = 'minute';
-  for (let i = 0; i < AGE_STEPS.length - 1; i += 1) {
-    const [, size] = AGE_STEPS[i + 1];
-    if (Math.abs(value) < size) break;
-    value /= size;
-    unit = AGE_STEPS[i + 1][0];
-  }
-  return Math.abs(value) < 1 && unit === 'minute' ? format.format(0, 'second') : format.format(Math.round(value), unit);
+/** Compact age for dense rows: "now", "5m", "1h", "2d", "3w", "4mo", "1y".
+ * A future timestamp (clock skew) reads "now", never "in 2m". */
+export function formatCompactAge(iso: string, now = Date.now()): string {
+  const minutes = Math.max(0, (now - Date.parse(iso)) / 60_000);
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${Math.floor(minutes)}m`;
+  const hours = minutes / 60;
+  if (hours < 24) return `${Math.floor(hours)}h`;
+  const days = hours / 24;
+  if (days < 7) return `${Math.floor(days)}d`;
+  if (days < 30) return `${Math.floor(days / 7)}w`;
+  if (days < 365) return `${Math.max(1, Math.floor(days / 30))}mo`;
+  return `${Math.floor(days / 365)}y`;
 }
 
 /** True only once `active` has held for `delayMs`: skeletons never flash for fast loads. */
