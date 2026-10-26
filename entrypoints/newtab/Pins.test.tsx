@@ -4,14 +4,12 @@ import {
   PinsView,
   PinProjection,
   persistAuthoritativeProjection,
+  pinImage,
   requestPinsAccess,
-  shouldPlayVideo,
-  videoPreload,
-  videoSource,
   type PinsAvailability,
 } from './Pins';
 import { verifyAndSavePinsConfig } from './Settings';
-import type { PinItem } from './feed';
+import type { FeedErrorKind, PinItem } from './feed';
 
 const baseItem: PinItem = {
   id: 'pin-1',
@@ -24,11 +22,17 @@ const baseItem: PinItem = {
 function render({
   items = [],
   failed = false,
+  errorKind = null,
+  settled = true,
+  showSkeleton = false,
   retrying = false,
   availability = 'ready',
 }: {
   items?: PinItem[];
   failed?: boolean;
+  errorKind?: FeedErrorKind | null;
+  settled?: boolean;
+  showSkeleton?: boolean;
   retrying?: boolean;
   availability?: PinsAvailability;
 } = {}) {
@@ -36,6 +40,9 @@ function render({
     <PinsView
       items={items}
       failed={failed}
+      errorKind={errorKind}
+      settled={settled}
+      showSkeleton={showSkeleton}
       retrying={retrying}
       availability={availability}
       unpin={vi.fn()}
@@ -52,16 +59,16 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('PinsView states', () => {
-  it('keeps an unconfigured source collapsed', () => {
+  it('invites a first note when no source is configured', () => {
     const html = render({ availability: 'unconfigured' });
-    expect(html).toContain('aria-hidden="true"');
+    expect(html).toContain('+ Note');
+    expect(html).toContain('Add a note or quote to keep it in view.');
     expect(html).not.toContain('Enable Pins');
     expect(html).not.toContain('Retry');
   });
 
   it('shows Enable Pins for a configured source without host access', () => {
     const html = render({ availability: 'needs-access' });
-    expect(html).toContain('aria-hidden="false"');
     expect(html).toContain('Chrome needs access to that host.');
     expect(html).toContain('Enable Pins');
   });
@@ -72,20 +79,34 @@ describe('PinsView states', () => {
     expect(html).toContain('Enabling…');
   });
 
-  it('shows retry states and keeps stale cards visible', () => {
-    expect(render({ failed: true })).toContain('Pins couldn’t load.');
-    const stale = render({ items: [baseItem], failed: true, retrying: true });
+  it('shows a static skeleton only once the first load is slow', () => {
+    expect(render({ settled: false })).not.toContain('row--skeleton');
+    const slow = render({ settled: false, showSkeleton: true });
+    expect(slow.match(/row--skeleton/g)).toHaveLength(3);
+    expect(slow).not.toContain('Nothing pinned yet');
+  });
+
+  it('says what belongs here when the source has no pins', () => {
+    expect(render()).toContain('Nothing pinned yet.');
+  });
+
+  it('names the cause, offers retry and keeps stale rows visible', () => {
+    const empty = render({ failed: true, errorKind: 'auth' });
+    expect(empty).toContain('Pins couldn’t load. The server didn’t accept the key. Check Settings.');
+    const stale = render({ items: [baseItem], failed: true, errorKind: 'offline', retrying: true });
     expect(stale).toContain('Garden pin');
-    expect(stale).toContain('Couldn’t refresh');
+    expect(stale).toContain('Couldn’t refresh Pins. Couldn’t reach the server.');
     expect(stale).toContain('Retrying…');
+    expect(stale).not.toContain('Nothing pinned yet');
   });
 });
 
-describe('media-first title-only cards', () => {
-  it('renders a lazy async public image, reserved fallback art, title, and explicit unpin only', () => {
+describe('vertical pin rows', () => {
+  it('renders a lazy 16:9 still, title, muted host and an explicit unpin only', () => {
     const publicImage = 'https://opengraph.githubassets.com/hash/example/repo';
     const richItem = {
       ...baseItem,
+      url: 'https://www.reading.example/article',
       media: { kind: 'image' as const, url: publicImage },
       description: 'NEVER_RENDER_DESCRIPTION',
       author: 'NEVER_RENDER_AUTHOR',
@@ -93,68 +114,51 @@ describe('media-first title-only cards', () => {
     const html = render({ items: [richItem] });
 
     expect(html).toContain(`src="${publicImage}"`);
-    expect(html).toContain('class="pins-media"');
-    expect(html).toContain('class="pins-media-fallback"');
+    expect(html).toContain('class="thumb thumb--wide"');
+    expect(html).toContain('width="96" height="54"');
     expect(html).toContain('loading="lazy"');
     expect(html).toContain('decoding="async"');
     expect(html).toContain('crossorigin="anonymous"');
     expect(html).toContain('referrerPolicy="no-referrer"');
-    expect(html).toContain('Garden pin');
+    expect(html).toContain('<span class="row-title row-title--clamp">Garden pin</span>');
+    expect(html).toContain('<span class="row-meta">reading.example</span>');
     expect(html).toContain('aria-label="Unpin Garden pin"');
     expect(html).not.toContain('NEVER_RENDER_DESCRIPTION');
     expect(html).not.toContain('NEVER_RENDER_AUTHOR');
     expect(html).not.toContain('/opened');
   });
 
-  it('renders a public video poster without attaching its offscreen source', () => {
+  it('shows a video as its poster still, never a playing video', () => {
     const video = 'https://video.twimg.com/ext_tw_video/example/pu/vid/avc1/clip.mp4';
     const poster = 'https://pbs.twimg.com/ext_tw_video_thumb/example/pu/img/poster.jpg';
     const html = render({
       items: [{ ...baseItem, media: { kind: 'video', url: video, poster_url: poster } }],
     });
 
-    expect(html).toContain('<video');
-    expect(html).not.toContain(`src="${video}"`);
-    expect(html).toContain(`poster="${poster}"`);
-    expect(html).toContain('preload="none"');
-    expect(html).toContain('loop=""');
-    expect(html).toContain('playsinline=""');
-    expect(html).not.toContain('autoplay');
+    expect(html).not.toContain('<video');
+    expect(html).not.toContain(video);
+    expect(html).toContain(`src="${poster}"`);
   });
 
-  it('supports the image_url compatibility alias when canonical media is absent', () => {
+  it('picks image, then poster, then the image_url alias', () => {
     const image = 'https://pbs.twimg.com/media/alias.jpg';
-    const html = render({ items: [{ ...baseItem, image_url: image }] });
-    expect(html).toContain(`src="${image}"`);
+    expect(pinImage({ ...baseItem, image_url: image })).toBe(image);
+    expect(
+      pinImage({ ...baseItem, media: { kind: 'video', url: 'https://video.twimg.com/a.mp4' }, image_url: image }),
+    ).toBe(image);
+    expect(pinImage(baseItem)).toBeNull();
   });
 
-  it('suppresses unsafe/protected media and keeps a 16:9 local-favicon fallback', () => {
+  it('suppresses unsafe/protected media and keeps the local-favicon placeholder', () => {
     const protectedMedia = 'https://eden.example/api/garden/media/private-id';
     const html = render({
       items: [{ ...baseItem, media: { kind: 'image', url: protectedMedia } }],
     });
 
     expect(html).not.toContain(protectedMedia);
-    expect(html).toContain('class="pins-media-fallback"');
+    expect(html).toContain('class="thumb-icon"');
     expect(html).toContain('chrome-extension://marktab-test-id/_favicon/');
     expect(html).toContain('pageUrl=https%3A%2F%2Freading.example%2Farticle');
-  });
-});
-
-describe('video viewport policy', () => {
-  it('attaches the source and upgrades preload only near the viewport', () => {
-    const source = 'https://video.twimg.com/example.mp4';
-    expect(videoSource(source, false)).toBeUndefined();
-    expect(videoSource(source, true)).toBe(source);
-    expect(videoPreload(false)).toBe('none');
-    expect(videoPreload(true)).toBe('metadata');
-  });
-
-  it('plays only while visible and never under reduced motion or after failure', () => {
-    expect(shouldPlayVideo({ inView: true, reducedMotion: false, failed: false })).toBe(true);
-    expect(shouldPlayVideo({ inView: false, reducedMotion: false, failed: false })).toBe(false);
-    expect(shouldPlayVideo({ inView: true, reducedMotion: true, failed: false })).toBe(false);
-    expect(shouldPlayVideo({ inView: true, reducedMotion: false, failed: true })).toBe(false);
   });
 });
 
@@ -233,13 +237,13 @@ describe('requestPinsAccess', () => {
 });
 
 describe('PinsView notes', () => {
-  it('opens for notes alone, with a big highlighted line and attribution', () => {
+  it('lists notes first as compact highlighter rows with an attribution', () => {
     const html = renderToStaticMarkup(
       <PinsView
-        items={[]}
+        items={[baseItem]}
         failed={false}
         retrying={false}
-        availability="unconfigured"
+        availability="ready"
         unpin={vi.fn()}
         enable={vi.fn()}
         retry={vi.fn()}
@@ -249,17 +253,17 @@ describe('PinsView notes', () => {
         ]}
       />,
     );
-    expect(html).toContain('data-open="true"');
-    expect(html).toContain('<p class="pins-note-text"><mark>Done is NOT Good</mark></p>');
+    expect(html.indexOf('Done is NOT Good')).toBeLessThan(html.indexOf('Garden pin'));
+    expect(html).toContain('<p class="note-text"><mark>Done is NOT Good</mark></p>');
     expect(html).toContain('data-size="lg"');
-    expect(html).toContain('<blockquote class="pins-note-text"><mark>Less, but better</mark></blockquote>');
-    expect(html).toMatch(/pins-note-by">— (<!-- -->)?Dieter Rams/);
+    expect(html).toMatch(/<blockquote class="note-text"><mark>“(<!-- -->)?Less, but better(<!-- -->)?”<\/mark><\/blockquote>/);
+    expect(html).toMatch(/note-by">— (<!-- -->)?Dieter Rams/);
     expect(html).toContain('aria-label="Remove note: Done is NOT Good"');
     expect(html).toContain('+ Note');
     expect(html).toContain('--note-mark:#ccff3d');
     expect(html).toContain('--note-mark:#ff7ad9');
-    expect(html.match(/class="pins-note-dot"/g)).toHaveLength(10);
+    expect(html.match(/class="note-dot"/g)).toHaveLength(10);
     expect(html).toContain('aria-label="pink" aria-pressed="true"');
+    expect(html).not.toContain('Add a note or quote');
   });
 });
-

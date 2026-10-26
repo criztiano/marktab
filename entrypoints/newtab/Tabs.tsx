@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import Thumb from './Thumb';
 import {
   TAB_LIMIT,
   closeTab,
@@ -9,14 +10,14 @@ import {
   requestTabAccess,
   type TabUsage,
 } from './tab-usage';
+import { faviconUrl } from './view-helpers';
 
 export type TabsAvailability = 'checking' | 'needs-access' | 'enabling' | 'ready';
 
 const REFRESH_DELAY_MS = 250;
 
-function localFaviconUrl(pageUrl: string): string {
-  return `chrome-extension://${browser.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=64`;
-}
+/** Rows shown before "Show all": the heaviest few are what matters at a glance. */
+export const TABS_COLLAPSED = 3;
 
 function useTabUsage() {
   const [availability, setAvailability] = useState<TabsAvailability>('checking');
@@ -100,17 +101,29 @@ interface TabsViewProps {
   enable: () => void;
   close: (id: number) => void;
   focus: (usage: TabUsage) => void;
+  expanded?: boolean;
+  onToggle?: () => void;
 }
 
-export function TabsView({ availability, usages, enable, close, focus }: TabsViewProps) {
+export function TabsView({ availability, usages, enable, close, focus, expanded = false, onToggle }: TabsViewProps) {
   if (availability === 'checking') return null;
 
   if (availability !== 'ready') {
     return (
-      <section className="tabs" aria-label="Open tabs">
-        <p className="pins-onboarding" role="status">
+      <section className="block tabs" aria-labelledby="tabs-title">
+        <div className="block-head">
+          <h2 className="block-title" id="tabs-title">
+            Open tabs
+          </h2>
+        </div>
+        <p className="block-note">
           <span>See which open tabs use the most memory, and close them.</span>
-          <button type="button" onClick={enable} disabled={availability === 'enabling'}>
+          <button
+            type="button"
+            className="text-button text-button--primary pressable"
+            onClick={enable}
+            disabled={availability === 'enabling'}
+          >
             {availability === 'enabling' ? 'Enabling…' : 'Show tabs'}
           </button>
         </p>
@@ -118,38 +131,44 @@ export function TabsView({ availability, usages, enable, close, focus }: TabsVie
     );
   }
 
-  const shown = usages?.slice(0, TAB_LIMIT) ?? [];
-  const heaviest = shown[0]?.bytes ?? 1;
+  const ranked = usages?.slice(0, TAB_LIMIT) ?? [];
+  const shown = expanded ? ranked : ranked.slice(0, TABS_COLLAPSED);
+  const heaviest = ranked[0]?.bytes ?? 1;
+  const canToggle = ranked.length > TABS_COLLAPSED;
 
   return (
-    <section className="tabs" data-open="true" aria-labelledby="tabs-title">
-      <h2 className="folder tabs-title" id="tabs-title">
-        <span>Open tabs by memory</span>
-        {usages && usages.length > TAB_LIMIT && (
-          <span className="tabs-count">
+    <section className="block tabs" data-open="true" aria-labelledby="tabs-title" aria-busy={usages === null}>
+      <div className="block-head">
+        <h2 className="block-title" id="tabs-title">
+          Open tabs by memory
+        </h2>
+        {expanded && usages && usages.length > TAB_LIMIT && (
+          <span className="block-count">
             Top {TAB_LIMIT} of {usages.length}
           </span>
         )}
-      </h2>
-      {usages && shown.length === 0 && <p className="tabs-empty">No open web pages.</p>}
-      <ol className="tabs-list">
+      </div>
+      {usages && ranked.length === 0 && <p className="block-note">No open web pages to measure.</p>}
+      <ol className="rows" id="tabs-list">
         {shown.map((usage) => {
           const style = { '--share': usage.bytes / heaviest } as CSSProperties;
           return (
-            <li key={usage.id} className="tabs-row" style={style}>
+            <li key={usage.id} className="row tabs-row" style={style}>
               <button
                 type="button"
-                className="tabs-open"
+                className="row-link pressable"
                 title={`${usage.title}\n${usage.url}`}
                 onClick={() => focus(usage)}
               >
-                <img src={localFaviconUrl(usage.url)} alt="" width={16} height={16} />
-                <span className="tabs-name">{usage.title}</span>
-                <span className="tabs-mem">{formatBytes(usage.bytes)}</span>
+                <Thumb favicon={faviconUrl(usage.url)} shape="square" />
+                <span className="row-text">
+                  <span className="row-title">{usage.title}</span>
+                </span>
+                <span className="row-aside">{formatBytes(usage.bytes)}</span>
               </button>
               <button
                 type="button"
-                className="tabs-close"
+                className="row-action pressable"
                 aria-label={`Close ${usage.title}`}
                 title="Close tab"
                 onClick={(e) => {
@@ -157,7 +176,7 @@ export function TabsView({ availability, usages, enable, close, focus }: TabsVie
                   const row = e.currentTarget.closest('li');
                   const neighbour = row?.nextElementSibling ?? row?.previousElementSibling;
                   close(usage.id);
-                  neighbour?.querySelector<HTMLButtonElement>('.tabs-close')?.focus();
+                  neighbour?.querySelector<HTMLButtonElement>('.row-action')?.focus();
                 }}
               >
                 ×
@@ -166,10 +185,22 @@ export function TabsView({ availability, usages, enable, close, focus }: TabsVie
           );
         })}
       </ol>
+      {canToggle && (
+        <button
+          type="button"
+          className="text-button pressable tabs-toggle"
+          aria-expanded={expanded}
+          aria-controls="tabs-list"
+          onClick={onToggle}
+        >
+          {expanded ? 'Show fewer' : `Show all ${ranked.length}`}
+        </button>
+      )}
     </section>
   );
 }
 
 export default function Tabs() {
-  return <TabsView {...useTabUsage()} />;
+  const [expanded, setExpanded] = useState(false);
+  return <TabsView {...useTabUsage()} expanded={expanded} onToggle={() => setExpanded((open) => !open)} />;
 }

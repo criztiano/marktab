@@ -49,11 +49,12 @@ export function rankTabs(usages: TabUsage[]): TabUsage[] {
     .map(({ usage }) => usage);
 }
 
+/** "214 MB" with a no-break space, so the unit never wraps away from its number. */
 export function formatBytes(bytes: number): string {
   const mb = bytes / 1024 ** 2;
-  if (mb < 1) return '<1 MB';
-  if (mb < 1024) return `${Math.round(mb)} MB`;
-  return `${(mb / 1024).toFixed(1)} GB`;
+  if (mb < 1) return '<1\u00a0MB';
+  if (mb < 1024) return `${Math.round(mb)}\u00a0MB`;
+  return `${(mb / 1024).toFixed(1)}\u00a0GB`;
 }
 
 /** Runs inside the page: must stay self-contained. */

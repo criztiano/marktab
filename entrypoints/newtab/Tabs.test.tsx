@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TabsView, type TabsAvailability } from './Tabs';
+import { TABS_COLLAPSED, TabsView, type TabsAvailability } from './Tabs';
 import { formatBytes, isMeasurable, loadTabUsage, rankTabs, TAB_LIMIT, type TabUsage } from './tab-usage';
 import { normaliseFolders } from './local-config';
 
@@ -10,11 +10,12 @@ function usage(id: number, bytes: number): TabUsage {
   return { id, windowId: 1, title: `Tab ${id}`, url: `https://site${id}.example/`, bytes };
 }
 
-function render(availability: TabsAvailability, usages: TabUsage[] | null = null) {
+function render(availability: TabsAvailability, usages: TabUsage[] | null = null, expanded = false) {
   return renderToStaticMarkup(
     <TabsView
       availability={availability}
       usages={usages}
+      expanded={expanded}
       enable={vi.fn()}
       close={vi.fn()}
       focus={vi.fn()}
@@ -38,9 +39,9 @@ describe('tab usage helpers', () => {
   });
 
   it('formats memory for a quick glance', () => {
-    expect(formatBytes(0.4 * MB)).toBe('<1 MB');
-    expect(formatBytes(412.4 * MB)).toBe('412 MB');
-    expect(formatBytes(1536 * MB)).toBe('1.5 GB');
+    expect(formatBytes(0.4 * MB)).toBe('<1\u00a0MB');
+    expect(formatBytes(412.4 * MB)).toBe('412\u00a0MB');
+    expect(formatBytes(1536 * MB)).toBe('1.5\u00a0GB');
   });
 
   it('measures only live web pages', () => {
@@ -98,20 +99,39 @@ describe('TabsView states', () => {
     expect(render('enabling')).toContain('disabled=""');
   });
 
-  it(`lists only the top ${TAB_LIMIT} tabs with memory and a close button each`, () => {
+  it(`shows the ${TABS_COLLAPSED} heaviest tabs with a "Show all" toggle`, () => {
     const usages = rankTabs(Array.from({ length: 15 }, (_, i) => usage(i + 1, (i + 1) * MB)));
     const html = render('ready', usages);
     expect(html).toContain('data-open="true"');
-    expect(html).toContain(`Top ${TAB_LIMIT} of 15`);
-    expect(html.match(/class="tabs-row"/g)).toHaveLength(TAB_LIMIT);
+    expect(html.match(/class="row tabs-row"/g)).toHaveLength(TABS_COLLAPSED);
     expect(html).toContain('Close Tab 15');
-    expect(html).not.toContain('Close Tab 3');
-    expect(html).toContain('15 MB');
+    expect(html).toContain('Close Tab 13');
+    expect(html).not.toContain('Close Tab 12');
+    expect(html).toContain(`Show all ${TAB_LIMIT}`);
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('15\u00a0MB');
     expect(html).toContain('chrome-extension://marktab-test-id/_favicon/');
+    expect(html).not.toContain('Top 12 of 15');
+  });
+
+  it(`expands to the top ${TAB_LIMIT} and offers to show fewer`, () => {
+    const usages = rankTabs(Array.from({ length: 15 }, (_, i) => usage(i + 1, (i + 1) * MB)));
+    const html = render('ready', usages, true);
+    expect(html.match(/class="row tabs-row"/g)).toHaveLength(TAB_LIMIT);
+    expect(html).toContain(`Top ${TAB_LIMIT} of 15`);
+    expect(html).toContain('Show fewer');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).not.toContain('Close Tab 3');
+  });
+
+  it('needs no toggle when everything already fits', () => {
+    const html = render('ready', [usage(1, 2 * MB), usage(2, MB)]);
+    expect(html.match(/class="row tabs-row"/g)).toHaveLength(2);
+    expect(html).not.toContain('Show all');
   });
 
   it('says so when no web pages are open', () => {
-    expect(render('ready', [])).toContain('No open web pages.');
+    expect(render('ready', [])).toContain('No open web pages to measure.');
   });
 });
 

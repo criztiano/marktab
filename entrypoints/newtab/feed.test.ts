@@ -2,8 +2,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_CONFIG,
   buildHeaders,
+  buildGardenSearchUrl,
   buildQueueUrl,
+  buildReviewUrl,
   createFeedClient,
+  edenItemUrl,
+  FeedContractError,
+  FeedHttpError,
+  feedErrorKind,
+  fetchGardenSearch,
+  fetchReview,
+  loadCachedReview,
+  parseGardenSearch,
+  parseReviewEnvelope,
+  reviewPageUrl,
+  saveCachedReview,
   createLatestCacheWriter,
   hasHostAccess,
   isCanonicalPinTimestamp,
@@ -228,6 +241,7 @@ describe('storage (config + cache V2)', () => {
     expect(storage.remove).toHaveBeenCalledWith([
       'feedQueueCache',
       'feedPinsCacheV2',
+      'feedReviewCacheV1',
       'edenBaseUrl',
       'edenToken',
     ]);
@@ -251,6 +265,7 @@ describe('storage (config + cache V2)', () => {
     expect(storage.remove).toHaveBeenCalledWith([
       'feedQueueCache',
       'feedPinsCacheV2',
+      'feedReviewCacheV1',
       'edenBaseUrl',
       'edenToken',
     ]);
@@ -279,6 +294,7 @@ describe('storage (config + cache V2)', () => {
     expect(storage.remove).toHaveBeenCalledWith([
       'feedQueueCache',
       'feedPinsCacheV2',
+      'feedReviewCacheV1',
       'edenBaseUrl',
       'edenToken',
     ]);
@@ -480,5 +496,126 @@ describe('createFeedClient', () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
     await createFeedClient({ baseUrl: 'https://feed.test:3335', token: '' }, fetchImpl).fetchQueue();
     expect(fetchImpl.mock.calls[0][1].headers).toEqual({});
+  });
+});
+
+describe('Garden search', () => {
+  it('builds an encoded, bounded search URL on the configured base', () => {
+    expect(buildGardenSearchUrl('https://feed.test:3335/', 'a&b c')).toBe(
+      'https://feed.test:3335/api/marktab/search?q=a%26b+c&limit=8',
+    );
+  });
+
+  it('links items only to same-origin rooted Eden paths', () => {
+    expect(edenItemUrl('https://eden.test/', '/garden/abc')).toBe('https://eden.test/garden/abc');
+    expect(edenItemUrl('https://eden.test', '//evil.example/x')).toBeNull();
+    expect(edenItemUrl('https://eden.test', 'https://evil.example/x')).toBeNull();
+    expect(edenItemUrl('https://eden.test', '/\\evil.example')).toBeNull();
+    expect(edenItemUrl('https://eden.test', 'garden/abc')).toBeNull();
+  });
+
+  it('keeps valid items, drops malformed ones and unsafe url/image fields', () => {
+    const items = parseGardenSearch({
+      items: [
+        {
+          id: 'g1',
+          title: ' Spring easing ',
+          url: 'https://example.com/post',
+          eden_path: '/garden/g1',
+          type: 'ingredient',
+          image_url: 'https://pbs.twimg.com/media/a.jpg',
+        },
+        { id: 'g2', title: 'No source', url: null, eden_path: '/garden/g2', image_url: 'https://eden.test/api/garden/media/x' },
+        { id: 'g3', title: 'Script', url: 'javascript:alert(1)', eden_path: '/garden/g3' },
+        { id: 'bad', title: 'No path', url: null },
+        { id: '', title: 'No id', eden_path: '/x' },
+      ],
+    });
+    expect(items).toEqual([
+      {
+        id: 'g1',
+        title: 'Spring easing',
+        url: 'https://example.com/post',
+        eden_path: '/garden/g1',
+        type: 'ingredient',
+        image_url: 'https://pbs.twimg.com/media/a.jpg',
+      },
+      { id: 'g2', title: 'No source', url: null, eden_path: '/garden/g2' },
+      { id: 'g3', title: 'Script', url: null, eden_path: '/garden/g3' },
+    ]);
+    expect(() => parseGardenSearch({ results: [] })).toThrow(FeedContractError);
+  });
+
+  it('sends the queue auth headers and the abort signal, and names HTTP failures', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ items: [] }));
+    await expect(fetchGardenSearch(config, 'x', controller.signal, fetchImpl)).resolves.toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledWith('https://feed.test:3335/api/marktab/search?q=x&limit=8', {
+      headers: { Authorization: 'Bearer secret', 'x-api-key': 'secret' },
+      redirect: 'error',
+      signal: controller.signal,
+    });
+
+    const missing = vi.fn().mockResolvedValue(jsonResponse({}, false, 404));
+    const error = await fetchGardenSearch(config, 'x', undefined, missing).catch((e) => e);
+    expect(error).toBeInstanceOf(FeedHttpError);
+    expect(feedErrorKind(error)).toBe('missing');
+  });
+
+  it('classifies failures into the causes the UI names', () => {
+    expect(feedErrorKind(new FeedHttpError(401))).toBe('auth');
+    expect(feedErrorKind(new FeedHttpError(403))).toBe('auth');
+    expect(feedErrorKind(new FeedHttpError(404))).toBe('missing');
+    expect(feedErrorKind(new FeedHttpError(502))).toBe('server');
+    expect(feedErrorKind(new FeedContractError())).toBe('server');
+    expect(feedErrorKind(new TypeError('Failed to fetch'))).toBe('offline');
+    expect(new FeedHttpError(500).message).toBe('Feed fetch failed: 500');
+  });
+});
+
+describe('Review', () => {
+  const post = { id: 'r1', title: 'Draft post', summary: 'A summary', kind: 'tweet', created_at: '2026-10-26T08:00:00.000Z' };
+
+  it('builds the review API and page URLs on the configured base', () => {
+    expect(buildReviewUrl('https://eden.test/')).toBe('https://eden.test/api/marktab/review?limit=6');
+    expect(reviewPageUrl('https://eden.test/')).toBe('https://eden.test/review');
+  });
+
+  it('parses the envelope, drops malformed posts and keeps total ≥ shown rows', () => {
+    expect(parseReviewEnvelope({ total: 14, items: [post, { id: 'x', title: 'No date' }] })).toEqual({
+      total: 14,
+      items: [post],
+    });
+    expect(parseReviewEnvelope({ items: [post] }).total).toBe(1);
+    expect(parseReviewEnvelope({ total: 0, items: [post] }).total).toBe(1);
+    expect(() => parseReviewEnvelope(null)).toThrow(FeedContractError);
+  });
+
+  it('fetches with auth headers and surfaces a 404 as missing', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ total: 1, items: [post] }));
+    await expect(fetchReview(config, undefined, fetchImpl)).resolves.toEqual({ total: 1, items: [post] });
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://feed.test:3335/api/marktab/review?limit=6');
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ Authorization: 'Bearer secret', 'x-api-key': 'secret' });
+
+    const missing = vi.fn().mockResolvedValue(jsonResponse({}, false, 404));
+    expect(feedErrorKind(await fetchReview(config, undefined, missing).catch((e) => e))).toBe('missing');
+  });
+
+  it('round-trips the cache and ignores a damaged one', async () => {
+    const store: Record<string, unknown> = {};
+    vi.stubGlobal('browser', {
+      storage: {
+        local: {
+          get: async (key: string) => (key in store ? { [key]: store[key] } : {}),
+          set: async (patch: Record<string, unknown>) => void Object.assign(store, patch),
+        },
+      },
+    });
+    expect(await loadCachedReview()).toBeNull();
+    await saveCachedReview({ total: 3, items: [post] });
+    expect(await loadCachedReview()).toEqual({ total: 3, items: [post] });
+    store.feedReviewCacheV1 = 'garbage';
+    expect(await loadCachedReview()).toBeNull();
+    vi.unstubAllGlobals();
   });
 });

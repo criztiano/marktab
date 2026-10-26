@@ -1,5 +1,7 @@
-/** Version embedded in this new-tab bundle. Keep it in step with package.json. */
-export const BUNDLE_VERSION = '0.2.0';
+import { version } from '../../package.json';
+
+/** Version embedded in this new-tab bundle, read from package.json at build time. */
+export const BUNDLE_VERSION: string = version;
 
 interface RuntimeVersionApi {
   getManifest(): { version: string };

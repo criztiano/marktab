@@ -39,7 +39,14 @@ const DEFAULT_LIMIT = 12;
 const MAX_LIMIT = 50;
 const LEGACY_CACHE_KEY = 'feedQueueCache';
 const CACHE_KEY = 'feedPinsCacheV2';
-const CONFIG_MIGRATION_KEYS = [LEGACY_CACHE_KEY, CACHE_KEY, 'edenBaseUrl', 'edenToken'];
+const REVIEW_CACHE_KEY = 'feedReviewCacheV1';
+const CONFIG_MIGRATION_KEYS = [
+  LEGACY_CACHE_KEY,
+  CACHE_KEY,
+  REVIEW_CACHE_KEY,
+  'edenBaseUrl',
+  'edenToken',
+];
 
 /** Strip a trailing slash so paths join without doubling up. */
 function trimBase(baseUrl: string): string {
@@ -249,10 +256,35 @@ export interface FeedClient {
 }
 
 export class FeedContractError extends Error {
-  constructor() {
-    super('Feed response is incompatible with Garden Pins.');
+  constructor(message = 'Feed response is incompatible with Garden Pins.') {
+    super(message);
     this.name = 'FeedContractError';
   }
+}
+
+/** A non-OK HTTP answer. The message keeps the historic "Feed …" prefix that
+ * Settings shows verbatim; `status` lets each block name the cause. */
+export class FeedHttpError extends Error {
+  constructor(
+    readonly status: number,
+    action = 'fetch',
+  ) {
+    super(`Feed ${action} failed: ${status}`);
+    this.name = 'FeedHttpError';
+  }
+}
+
+/** What went wrong, in the terms each block's error copy needs. */
+export type FeedErrorKind = 'offline' | 'auth' | 'missing' | 'server';
+
+export function feedErrorKind(error: unknown): FeedErrorKind {
+  if (error instanceof FeedHttpError) {
+    if (error.status === 401 || error.status === 403) return 'auth';
+    if (error.status === 404) return 'missing';
+    return 'server';
+  }
+  if (error instanceof FeedContractError) return 'server';
+  return 'offline'; // fetch rejects with a TypeError when the host is unreachable
 }
 
 /** Accept a canonical envelope while tolerating isolated bad entries. A
@@ -279,7 +311,7 @@ export function createFeedClient(config: FeedConfig, fetchImpl: typeof fetch = f
   return {
     async fetchQueue(query) {
       const response = await fetchImpl(buildQueueUrl(base, query), { headers, redirect: 'error' });
-      if (!response.ok) throw new Error(`Feed fetch failed: ${response.status}`);
+      if (!response.ok) throw new FeedHttpError(response.status);
       return parsePinsEnvelope(await response.json());
     },
     async unpin(id) {
@@ -292,9 +324,182 @@ export function createFeedClient(config: FeedConfig, fetchImpl: typeof fetch = f
           redirect: 'error',
         },
       );
-      if (!response.ok) throw new Error(`Feed dismiss ${id} failed: ${response.status}`);
+      if (!response.ok) throw new FeedHttpError(response.status, `dismiss ${id}`);
     },
   };
+}
+
+// --- Garden search + Review: read-only GETs against the same configured host ---
+
+export interface GardenSearchItem {
+  id: string;
+  title: string;
+  /** The original web page, when the Garden item has one. */
+  url: string | null;
+  /** Path of the item inside Eden's Garden, e.g. "/garden/abc". */
+  eden_path: string;
+  type?: string;
+  description?: string;
+  image_url?: string;
+}
+
+export interface ReviewItem {
+  id: string;
+  title: string;
+  summary?: string;
+  kind?: string;
+  created_at: string;
+}
+
+export interface ReviewSnapshot {
+  total: number;
+  items: ReviewItem[];
+}
+
+export const SEARCH_LIMIT = 8;
+export const REVIEW_LIMIT = 6;
+
+export function buildGardenSearchUrl(baseUrl: string, q: string, limit = SEARCH_LIMIT): string {
+  const params = new URLSearchParams({ q, limit: String(boundedLimit(limit)) });
+  return `${trimBase(baseUrl)}/api/marktab/search?${params}`;
+}
+
+export function buildReviewUrl(baseUrl: string, limit = REVIEW_LIMIT): string {
+  const params = new URLSearchParams({ limit: String(boundedLimit(limit)) });
+  return `${trimBase(baseUrl)}/api/marktab/review?${params}`;
+}
+
+/** Eden's Review page. It has no per-post deep link, so every row opens it. */
+export function reviewPageUrl(baseUrl: string): string {
+  return `${trimBase(baseUrl)}/review`;
+}
+
+/** A Garden item's page on the configured host. Only a rooted, same-origin
+ * path is accepted, so a hostile `eden_path` cannot point a link elsewhere. */
+export function edenItemUrl(baseUrl: string, edenPath: string): string | null {
+  if (!edenPath.startsWith('/') || edenPath.startsWith('//') || edenPath.includes('\\')) return null;
+  if (!safeHttpUrl(baseUrl)) return null;
+  try {
+    const href = `${trimBase(baseUrl)}${edenPath}`;
+    return new URL(href).origin === new URL(baseUrl).origin ? href : null;
+  } catch {
+    return null;
+  }
+}
+
+const optionalText = (value: unknown): string | undefined =>
+  isString(value) && value.trim() ? value.trim() : undefined;
+
+function normalizeSearchItem(value: unknown): GardenSearchItem | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const item = value as Record<string, unknown>;
+  if (
+    !isString(item.id) || !item.id.trim() ||
+    !isString(item.title) || !item.title.trim() ||
+    !isString(item.eden_path) || !item.eden_path.startsWith('/') || item.eden_path.startsWith('//')
+  ) {
+    return null;
+  }
+  const url = isString(item.url) ? safeHttpUrl(item.url.trim()) : null;
+  const imageUrl = isString(item.image_url) ? safeMediaUrl(item.image_url.trim()) : null;
+  const type = optionalText(item.type);
+  const description = optionalText(item.description);
+  return {
+    id: item.id.trim(),
+    title: item.title.trim(),
+    url,
+    eden_path: item.eden_path,
+    ...(type ? { type } : {}),
+    ...(description ? { description } : {}),
+    ...(imageUrl ? { image_url: imageUrl } : {}),
+  };
+}
+
+/** `{ items: [...] }`; malformed entries are dropped, a malformed envelope throws. */
+export function parseGardenSearch(data: unknown): GardenSearchItem[] {
+  if (typeof data !== 'object' || data === null || !Array.isArray((data as { items?: unknown }).items)) {
+    throw new FeedContractError('Feed search response is not a list of Garden items.');
+  }
+  return (data as { items: unknown[] }).items.flatMap((value) => {
+    const item = normalizeSearchItem(value);
+    return item ? [item] : [];
+  });
+}
+
+function normalizeReviewItem(value: unknown): ReviewItem | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const item = value as Record<string, unknown>;
+  if (
+    !isString(item.id) || !item.id.trim() ||
+    !isString(item.title) || !item.title.trim() ||
+    !isString(item.created_at) || !Number.isFinite(Date.parse(item.created_at))
+  ) {
+    return null;
+  }
+  const summary = optionalText(item.summary);
+  const kind = optionalText(item.kind);
+  return {
+    id: item.id.trim(),
+    title: item.title.trim(),
+    created_at: item.created_at,
+    ...(summary ? { summary } : {}),
+    ...(kind ? { kind } : {}),
+  };
+}
+
+/** `{ total, items }`; `total` never reads lower than the rows we show. */
+export function parseReviewEnvelope(data: unknown): ReviewSnapshot {
+  if (typeof data !== 'object' || data === null || !Array.isArray((data as { items?: unknown }).items)) {
+    throw new FeedContractError('Feed review response is not a list of posts.');
+  }
+  const envelope = data as { total?: unknown; items: unknown[] };
+  const items = envelope.items.flatMap((value) => {
+    const item = normalizeReviewItem(value);
+    return item ? [item] : [];
+  });
+  const total =
+    typeof envelope.total === 'number' && Number.isFinite(envelope.total)
+      ? Math.max(Math.floor(envelope.total), items.length)
+      : items.length;
+  return { total, items };
+}
+
+async function getJson(url: string, config: FeedConfig, signal: AbortSignal | undefined, fetchImpl: typeof fetch) {
+  const response = await fetchImpl(url, { headers: buildHeaders(config.token), redirect: 'error', signal });
+  if (!response.ok) throw new FeedHttpError(response.status);
+  return response.json();
+}
+
+export async function fetchGardenSearch(
+  config: FeedConfig,
+  q: string,
+  signal?: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+): Promise<GardenSearchItem[]> {
+  return parseGardenSearch(await getJson(buildGardenSearchUrl(config.baseUrl, q), config, signal, fetchImpl));
+}
+
+export async function fetchReview(
+  config: FeedConfig,
+  signal?: AbortSignal,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ReviewSnapshot> {
+  return parseReviewEnvelope(await getJson(buildReviewUrl(config.baseUrl), config, signal, fetchImpl));
+}
+
+export async function loadCachedReview(): Promise<ReviewSnapshot | null> {
+  const stored = await browser.storage.local.get(REVIEW_CACHE_KEY);
+  const cached = stored[REVIEW_CACHE_KEY];
+  if (cached === undefined) return null;
+  try {
+    return parseReviewEnvelope(cached);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveCachedReview(snapshot: ReviewSnapshot): Promise<void> {
+  await browser.storage.local.set({ [REVIEW_CACHE_KEY]: snapshot });
 }
 
 // --- Host-access + storage helpers: the only browser.* touches in this module ---
@@ -346,9 +551,19 @@ async function persistMigratedConfig(config: FeedConfig): Promise<void> {
   await browser.storage.local.remove(CONFIG_MIGRATION_KEYS);
 }
 
+let pendingConfig: Promise<FeedConfig> | null = null;
+
 /** Read canonical config, otherwise migrate a local bundle or legacy eden* keys.
- * Every migration invalidates both queue-cache generations. */
-export async function loadConfig(): Promise<FeedConfig> {
+ * Every migration invalidates all cached feed data. Blocks that mount together
+ * share one in-flight read, so a migration runs once. */
+export function loadConfig(): Promise<FeedConfig> {
+  pendingConfig ??= readConfig().finally(() => {
+    pendingConfig = null;
+  });
+  return pendingConfig;
+}
+
+async function readConfig(): Promise<FeedConfig> {
   const stored = await browser.storage.local.get([
     'feedBaseUrl',
     'feedToken',

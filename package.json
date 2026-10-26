@@ -2,7 +2,7 @@
   "name": "marktab",
   "description": "marktab — your bookmarks as a minimal new tab page. Also a WXT starter template.",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "dev": "wxt",
@@ -13,7 +13,7 @@
     "compile": "tsc --noEmit",
     "test": "vitest run",
     "postinstall": "wxt prepare",
-    "build:local": "npm run build && node scripts/configure-unpacked.mjs"
+    "build:local": "npm version patch --no-git-tag-version && npm run build && node scripts/configure-unpacked.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
