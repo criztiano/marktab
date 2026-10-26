@@ -56,7 +56,7 @@ npm run compile         # typecheck only
 
 ### Pins (optional feed)
 
-"Pins" is an **optional** horizontal row backed by persistent pins from your Garden. It ships **dormant** — the extension requests no network access at install and the row stays hidden until you configure a server. The feed client talks only to that configured host.
+"Pins" is an **optional** list backed by persistent pins from your Garden. It ships **dormant** — the extension requests no network access at install and makes no request until you configure a server. Once a server is configured and granted, the search box searches your Garden and a "Review" block lists posts waiting in Eden's Review page. The feed client talks only to that configured host.
 
 **Configure it** with the **gear button** (top-right): enter your server's base URL (+ an optional API token) and hit **Save & test**. Chrome asks once for that host; then Marktab saves the values and verifies the connection inline. An `https` URL is required when you set a token.
 

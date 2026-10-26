@@ -189,7 +189,7 @@ export default function Settings({ onSaved }: SettingsProps) {
       <button
         ref={buttonRef}
         type="button"
-        className="settings-btn"
+        className="settings-btn pressable"
         aria-label="Settings"
         aria-haspopup="dialog"
         onClick={() => setOpen(true)}
@@ -212,8 +212,8 @@ export default function Settings({ onSaved }: SettingsProps) {
           >
             <h2 id="settings-title" className="settings-title">Pins source</h2>
             <p className="settings-help">
-              Point this at a server that exposes Garden-backed Marktab Pins (see the README). Leave it
-              blank to hide the Pins row.
+              Point this at a server that exposes Garden-backed Marktab Pins (see the README). It also
+              powers Garden search and Review. Leave it blank to keep the new tab offline.
             </p>
 
             <label className="settings-field">
@@ -239,7 +239,7 @@ export default function Settings({ onSaved }: SettingsProps) {
                 />
                 <button
                   type="button"
-                  className="settings-reveal"
+                  className="settings-reveal text-button pressable"
                   aria-pressed={showToken}
                   onClick={() => setShowToken((s) => !s)}
                 >
@@ -253,12 +253,12 @@ export default function Settings({ onSaved }: SettingsProps) {
             </p>
 
             <div className="settings-actions">
-              <button type="button" className="settings-cancel" onClick={close}>
+              <button type="button" className="settings-cancel text-button pressable" onClick={close}>
                 Close
               </button>
               <button
                 type="button"
-                className="settings-save"
+                className="settings-save text-button text-button--primary pressable"
                 onClick={save}
                 disabled={status.kind === 'testing'}
               >

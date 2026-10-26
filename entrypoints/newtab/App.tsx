@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { BookmarksView } from './Bookmarks';
 import Pins from './Pins';
+import Review from './Review';
+import {
+  SearchResults,
+  bookmarkRows,
+  gardenRows,
+  searchStatus,
+  useGardenSearch,
+  type Bookmark,
+} from './Search';
 import Settings from './Settings';
 import Tabs from './Tabs';
+import { useGardenSource } from './garden-source';
 import { loadShownFolders } from './local-config';
 
 // Minimal local type — avoids depending on polyfill type exports.
@@ -16,31 +27,12 @@ interface Section {
   id: string;
   /** Folder name */
   path: string;
-  items: { id: string; title: string; url: string }[];
+  items: Bookmark[];
 }
 
 /** Root folders whose direct bookmarks we don't list (subfolders still show).
  *  Chrome ids: '1' = Bookmarks Bar. Add '2' (Other) or '3' (Mobile) to hide those too. */
 const HIDDEN_ROOTS = new Set(['1']);
-
-/** Chrome's local favicon cache — no network requests, needs "favicon" permission. */
-function faviconUrl(pageUrl: string): string {
-  return `chrome-extension://${browser.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=64`;
-}
-
-/** Wrap the first case-insensitive occurrence of `q` (already lowercased) in <mark>. */
-function highlight(text: string, q: string) {
-  if (!q) return text;
-  const i = text.toLowerCase().indexOf(q);
-  if (i === -1) return text; // matched on URL, not title
-  return (
-    <>
-      {text.slice(0, i)}
-      <mark>{text.slice(i, i + q.length)}</mark>
-      {text.slice(i + q.length)}
-    </>
-  );
-}
 
 /** Walk the bookmark tree, emit one section per folder that directly contains bookmarks. */
 function flatten(nodes: BookmarkNode[]): Section[] {
@@ -67,11 +59,12 @@ function pickFolders(sections: Section[], shown: Set<string> | null): Section[] 
 }
 
 export default function App() {
-  const [sections, setSections] = useState<Section[]>([]);
+  const [sections, setSections] = useState<Section[] | null>(null);
   const [query, setQuery] = useState('');
-  const [reloadKey, setReloadKey] = useState(0); // bump to re-fetch Pins after a config save
+  const [reloadKey, setReloadKey] = useState(0); // bump to re-read the source after a config save
   const inputRef = useRef<HTMLInputElement>(null);
-  const columnsRef = useRef<HTMLDivElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const openWhenReady = useRef(false);
 
   useEffect(() => {
     const shown = loadShownFolders(); // read once, before the first paint of sections
@@ -91,28 +84,44 @@ export default function App() {
     return () => events.forEach((e) => e.removeListener(load));
   }, []);
 
-  const q = query.trim().toLowerCase();
+  const bookmarks = useMemo(() => (sections ?? []).flatMap((s) => s.items), [sections]);
 
-  const filtered = useMemo(() => {
-    if (!q) return sections;
-    return sections
-      .map((s) => ({
-        ...s,
-        items: s.items.filter(
-          (i) => i.title.toLowerCase().includes(q) || i.url.toLowerCase().includes(q),
-        ),
-      }))
-      .filter((s) => s.items.length > 0);
-  }, [sections, q]);
+  // Garden search when a source is configured and granted; otherwise bookmarks.
+  const source = useGardenSource(reloadKey);
+  const garden = source.status === 'ready' ? source.config : null;
+  const term = query.trim();
+  const q = term.toLowerCase();
+  const search = useGardenSearch(garden, term);
+  const rows = useMemo(
+    () => (garden ? gardenRows(search.items, garden.baseUrl) : q ? bookmarkRows(bookmarks, q) : []),
+    [garden, search.items, bookmarks, q],
+  );
+  const loading = garden ? search.loading : false;
+  const shownRows = garden && search.error && !loading ? [] : rows;
 
-  const total = useMemo(() => sections.reduce((n, s) => n + s.items.length, 0), [sections]);
-  const matches = useMemo(() => filtered.reduce((n, s) => n + s.items.length, 0), [filtered]);
+  const firstLink = () => resultsRef.current?.querySelector<HTMLAnchorElement>('a');
 
-  // Enter opens the first match in the current tab.
+  // Enter opens the first result in the current tab; while Garden is still
+  // answering, it opens the first result of the query that was typed.
   const openFirst = () => {
-    const first = filtered[0]?.items[0];
-    if (first) window.location.href = first.url;
+    if (loading) {
+      openWhenReady.current = true;
+      return;
+    }
+    const first = firstLink();
+    if (first) window.location.href = first.href;
   };
+
+  useEffect(() => {
+    if (loading || !openWhenReady.current) return;
+    openWhenReady.current = false;
+    const first = firstLink();
+    if (first) window.location.href = first.href;
+  }, [loading]);
+
+  useEffect(() => {
+    openWhenReady.current = false; // a new query cancels a pending Enter
+  }, [term]);
 
   // Arrow keys move real focus between the search input and result links;
   // Esc clears; typing from anywhere lands in the search box.
@@ -125,9 +134,7 @@ export default function App() {
     }
     const inSearch = e.target === input;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      const links = Array.from(
-        columnsRef.current?.querySelectorAll<HTMLAnchorElement>('.list a') ?? [],
-      );
+      const links = Array.from(resultsRef.current?.querySelectorAll<HTMLAnchorElement>('a') ?? []);
       if (links.length === 0) return;
       let next: HTMLElement | null = null;
       if (inSearch) {
@@ -143,55 +150,67 @@ export default function App() {
       return;
     }
     const pressesButton = e.key === ' ' && e.target instanceof HTMLButtonElement;
-    if (!inSearch && !pressesButton && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const inField = e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLInputElement && !inSearch);
+    if (!inSearch && !inField && !pressesButton && e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
       input?.focus(); // keydown's default action then types into the input
     }
   };
 
+  const status = searchStatus({
+    mode: garden ? 'garden' : 'bookmarks',
+    q: term,
+    rows: shownRows.length,
+    loading,
+    error: search.error,
+  });
+  const searching = term.length > 0;
+
   return (
     <main className="app" onKeyDown={onKeyDown}>
-      <h1 className="sr-only">marktab</h1>
+      <h1 className="sr-only" translate="no">
+        marktab
+      </h1>
       <Settings onSaved={() => setReloadKey((k) => k + 1)} />
       <div className="search-bar" role="search">
         <input
           ref={inputRef}
           className="search"
           type="text"
-          placeholder={`Search ${total} bookmarks…`}
-          aria-label="Search bookmarks"
+          placeholder={garden ? 'Search Garden…' : source.status === 'checking' ? 'Search…' : 'Search bookmarks…'}
+          aria-label={garden ? 'Search Garden' : 'Search bookmarks'}
+          aria-describedby="search-status"
+          autoComplete="off"
+          spellCheck={false}
           value={query}
           autoFocus
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && openFirst()}
         />
-        <p className="status" aria-live="polite">
-          {q && `${matches} ${matches === 1 ? 'match' : 'matches'}`}
-        </p>
-      </div>
-      {!q && <Pins key={reloadKey} />}
-      {/* Tabs stays mounted while searching so its readings survive a quick search. */}
-      <div className="layout" data-searching={q ? 'true' : undefined}>
-        <Tabs />
-        <div className="bookmarks">
-          {filtered.length === 0 && (
-            <p className="empty">{total === 0 ? 'No bookmarks yet.' : 'Nothing matches.'}</p>
+        <div className="search-status" data-error={(garden && search.error && !loading) || undefined}>
+          <p id="search-status" role="status">
+            {status}
+          </p>
+          {garden && search.error && !loading && (
+            <button type="button" className="text-button pressable" onClick={search.retry}>
+              Retry
+            </button>
           )}
-          <div className="columns" ref={columnsRef}>
-            {filtered.map((section) => (
-              <section key={section.id} className="column">
-                <h2 className="folder">{section.path}</h2>
-                <ul className="list">
-                  {section.items.map((item) => (
-                    <li key={item.id}>
-                      <a href={item.url} title={`${item.title}\n${item.url}`}>
-                        <img src={faviconUrl(item.url)} alt="" width={16} height={16} loading="lazy" />
-                        <span>{highlight(item.title, q)}</span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            ))}
+        </div>
+      </div>
+      <div ref={resultsRef}>
+        {searching && <SearchResults rows={shownRows} q={q} busy={loading} />}
+      </div>
+      {/* Everything below stays mounted while searching, so Pins, Review and
+          tab readings survive a quick search. */}
+      <div className="home" hidden={searching}>
+        <BookmarksView bookmarks={bookmarks} loaded={sections !== null} />
+        <div className="dashboard">
+          <div className="dashboard-main">
+            <Pins key={reloadKey} />
+          </div>
+          <div className="dashboard-side">
+            <Review key={reloadKey} source={source} />
+            <Tabs />
           </div>
         </div>
       </div>

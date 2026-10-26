@@ -6,11 +6,12 @@ import {
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
-  type RefObject,
 } from 'react';
+import Thumb from './Thumb';
 import {
   createFeedClient,
   createLatestCacheWriter,
+  feedErrorKind,
   hasHostAccess,
   loadCachedItems,
   loadConfig,
@@ -19,9 +20,9 @@ import {
   safeMediaUrl,
   type FeedClient,
   type FeedConfig,
+  type FeedErrorKind,
   type LatestCacheWriter,
   type PinItem,
-  type PinMedia,
 } from './feed';
 import {
   createNote,
@@ -33,23 +34,21 @@ import {
   type NoteColor,
   type PinNote,
 } from './notes';
+import { displayHost, faviconUrl, useDelayedFlag } from './view-helpers';
 
 export type PinsAvailability = 'unconfigured' | 'needs-access' | 'enabling' | 'ready';
 
 interface FeedQueueState {
   items: PinItem[];
   failed: boolean;
+  errorKind: FeedErrorKind | null;
+  /** The first live answer (or a cached list) has arrived. */
+  settled: boolean;
   retrying: boolean;
   availability: PinsAvailability;
   unpin: (id: string) => void;
   enable: () => void;
   retry: () => void;
-}
-
-interface PlaybackPolicy {
-  inView: boolean;
-  reducedMotion: boolean;
-  failed: boolean;
 }
 
 interface RefreshTicket {
@@ -134,19 +133,6 @@ export function persistAuthoritativeProjection(
 // One owner per extension page module, rather than one per React mount.
 const sharedPinsCacheWriter = createLatestCacheWriter();
 
-export function shouldPlayVideo({ inView, reducedMotion, failed }: PlaybackPolicy): boolean {
-  return inView && !reducedMotion && !failed;
-}
-
-export function videoPreload(nearViewport: boolean): 'none' | 'metadata' {
-  return nearViewport ? 'metadata' : 'none';
-}
-
-/** Omitting src (rather than relying on preload="none") is the network gate. */
-export function videoSource(url: string, nearViewport: boolean): string | undefined {
-  return nearViewport ? url : undefined;
-}
-
 /** Keep permissions.request as the first async operation reached by the button
  * so Chrome can associate it with the user's click gesture. */
 export function requestPinsAccess(
@@ -156,147 +142,26 @@ export function requestPinsAccess(
   return request(baseUrl);
 }
 
-function localFaviconUrl(pageUrl: string): string {
-  return `chrome-extension://${browser.runtime.id}/_favicon/?pageUrl=${encodeURIComponent(pageUrl)}&size=64`;
-}
-
-function publicMedia(item: PinItem): PinMedia | null {
-  const canonicalUrl = safeMediaUrl(item.media?.url);
-  if (item.media && canonicalUrl) {
-    return {
-      kind: item.media.kind,
-      url: canonicalUrl,
-      ...(item.media.kind === 'video'
-        ? { poster_url: safeMediaUrl(item.media.poster_url) ?? undefined }
-        : {}),
-    };
+/** The one still image a row shows: a direct public image, else a video's
+ * poster. Video itself never plays in the list. */
+export function pinImage(item: PinItem): string | null {
+  if (item.media?.kind === 'image') {
+    const image = safeMediaUrl(item.media.url);
+    if (image) return image;
   }
-  const compatibilityImage = safeMediaUrl(item.image_url);
-  return compatibilityImage ? { kind: 'image', url: compatibilityImage } : null;
-}
-
-function useNearViewport(target: RefObject<HTMLElement>, enabled: boolean): boolean {
-  const [near, setNear] = useState(false);
-  useEffect(() => {
-    const element = target.current;
-    if (!enabled || !element || near) return;
-    if (typeof IntersectionObserver === 'undefined') {
-      setNear(true);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setNear(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: '240px 0px' },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [enabled, near, target]);
-  return near;
-}
-
-function useInView(target: RefObject<HTMLElement>, enabled: boolean): boolean {
-  const [inView, setInView] = useState(false);
-  useEffect(() => {
-    const element = target.current;
-    if (!enabled || !element || typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(
-      ([entry]) => setInView(entry.isIntersecting && entry.intersectionRatio >= 0.5),
-      { threshold: [0, 0.5] },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [enabled, target]);
-  return inView;
-}
-
-function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(
-    () => typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches,
-  );
-  useEffect(() => {
-    if (typeof matchMedia === 'undefined') return;
-    const query = matchMedia('(prefers-reduced-motion: reduce)');
-    const update = () => setReduced(query.matches);
-    update();
-    query.addEventListener('change', update);
-    return () => query.removeEventListener('change', update);
-  }, []);
-  return reduced;
-}
-
-function PinMediaPreview({ item }: { item: PinItem }) {
-  const media = publicMedia(item);
-  const [failed, setFailed] = useState(false);
-  const containerRef = useRef<HTMLSpanElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const isVideo = media?.kind === 'video';
-  const nearViewport = useNearViewport(containerRef, isVideo);
-  const inView = useInView(containerRef, isVideo);
-  const reducedMotion = useReducedMotion();
-
-  useEffect(() => setFailed(false), [media?.url]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (shouldPlayVideo({ inView, reducedMotion, failed })) {
-      void video.play().catch(() => {});
-    } else {
-      video.pause();
-    }
-  }, [failed, inView, reducedMotion]);
-
-  return (
-    <span ref={containerRef} className="pins-media" aria-hidden="true">
-      <span className="pins-media-fallback">
-        <img
-          src={localFaviconUrl(item.url)}
-          alt=""
-          width={40}
-          height={40}
-          loading="lazy"
-          decoding="async"
-        />
-      </span>
-      {media?.kind === 'image' && !failed && (
-        <img
-          className="pins-media-asset"
-          src={media.url}
-          crossOrigin="anonymous"
-          referrerPolicy="no-referrer"
-          alt=""
-          loading="lazy"
-          decoding="async"
-          onError={() => setFailed(true)}
-        />
-      )}
-      {media?.kind === 'video' && !failed && (
-        <video
-          ref={videoRef}
-          className="pins-media-asset"
-          src={videoSource(media.url, nearViewport)}
-          poster={media.poster_url}
-          crossOrigin="anonymous"
-          muted
-          loop
-          playsInline
-          preload={videoPreload(nearViewport)}
-          onError={() => setFailed(true)}
-        />
-      )}
-    </span>
-  );
+  if (item.media?.kind === 'video') {
+    const poster = safeMediaUrl(item.media.poster_url);
+    if (poster) return poster;
+  }
+  return safeMediaUrl(item.image_url);
 }
 
 /** Stale-while-revalidate with explicit host-access onboarding. */
 function useFeedQueue(): FeedQueueState {
   const [items, setItems] = useState<PinItem[]>([]);
   const [failed, setFailed] = useState(false);
+  const [errorKind, setErrorKind] = useState<FeedErrorKind | null>(null);
+  const [settled, setSettled] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [availability, setAvailability] = useState<PinsAvailability>('unconfigured');
   const clientRef = useRef<FeedClient | null>(null);
@@ -335,9 +200,13 @@ function useFeedQueue(): FeedQueueState {
         );
         if (cacheWrite) void cacheWrite.catch(() => {});
         setFailed(false);
-      } catch {
-        if (mountedRef.current) setFailed(true);
+        setErrorKind(null);
+      } catch (error) {
+        if (!mountedRef.current) return;
+        setFailed(true);
+        setErrorKind(feedErrorKind(error));
       } finally {
+        if (mountedRef.current) setSettled(true);
         if (isRetry) {
           retryingRef.current = false;
           if (mountedRef.current) setRetrying(false);
@@ -363,6 +232,7 @@ function useFeedQueue(): FeedQueueState {
           cached,
         );
         if (projected) setItems(projected);
+        setSettled(true);
       }
       clientRef.current = createFeedClient(config);
       if (!showProgress) setAvailability('ready');
@@ -431,16 +301,19 @@ function useFeedQueue(): FeedQueueState {
       .then(() => {
         if (projectionRef.current.confirmUnpin(ticket)) void refresh(false);
       })
-      .catch(() => {
+      .catch((error) => {
         if (!mountedRef.current) return;
         setItems((previous) => projectionRef.current.rollbackUnpin(ticket, previous));
         setFailed(true);
+        setErrorKind(feedErrorKind(error));
       });
   };
 
   return {
     items,
     failed,
+    errorKind,
+    settled,
     retrying,
     availability,
     unpin,
@@ -490,50 +363,55 @@ const NOTE_COLOR_NAMES = Object.keys(NOTE_COLORS) as NoteColor[];
 
 function NoteCard({
   note,
-  index,
   onRemove,
   onRecolor,
 }: {
   note: PinNote;
-  index: number;
   onRemove: () => void;
   onRecolor: (color: NoteColor) => void;
 }) {
   const color = note.color ?? 'lime';
-  const style = { '--i': index, '--note-mark': NOTE_COLORS[color] } as CSSProperties;
+  const style = { '--note-mark': NOTE_COLORS[color] } as CSSProperties;
   const label = note.by ? `quote by ${note.by}` : 'note';
   return (
-    <li className="pins-card pins-note" data-size={noteSize(note.text)} style={style}>
-      <figure className="pins-note-body">
+    <li className="row note" data-size={noteSize(note.text)} style={style}>
+      <figure className="note-body">
         {note.by ? (
           <>
-            <blockquote className="pins-note-text">
-              <mark>{note.text}</mark>
+            <blockquote className="note-text">
+              <mark>“{note.text}”</mark>
             </blockquote>
-            <figcaption className="pins-note-by">— {note.by}</figcaption>
+            <figcaption className="note-by">— {note.by}</figcaption>
           </>
         ) : (
-          <p className="pins-note-text">
+          <p className="note-text">
             <mark>{note.text}</mark>
           </p>
         )}
       </figure>
-      <span className="pins-note-colors" role="group" aria-label="Highlighter colour">
-        {NOTE_COLOR_NAMES.map((name) => (
-          <button
-            key={name}
-            type="button"
-            className="pins-note-dot"
-            style={{ background: NOTE_COLORS[name] }}
-            aria-label={name}
-            aria-pressed={name === color}
-            onClick={() => onRecolor(name)}
-          />
-        ))}
+      <span className="note-tools">
+        <span className="note-colors" role="group" aria-label="Highlighter colour">
+          {NOTE_COLOR_NAMES.map((name) => (
+            <button
+              key={name}
+              type="button"
+              className="note-dot"
+              style={{ '--dot': NOTE_COLORS[name] } as CSSProperties}
+              aria-label={name}
+              aria-pressed={name === color}
+              onClick={() => onRecolor(name)}
+            />
+          ))}
+        </span>
+        <button
+          type="button"
+          className="row-action pressable"
+          aria-label={`Remove ${label}: ${note.text}`}
+          onClick={onRemove}
+        >
+          ×
+        </button>
       </span>
-      <button type="button" className="pins-dismiss" aria-label={`Remove ${label}: ${note.text}`} onClick={onRemove}>
-        ×
-      </button>
     </li>
   );
 }
@@ -557,32 +435,32 @@ function NoteComposer({ onSave, onClose }: { onSave: (text: string, by: string) 
   };
 
   return (
-    <li className="pins-card pins-note pins-note--draft" data-size={noteSize(text)}>
-      <form className="pins-note-body" onSubmit={submit} onKeyDown={onKeyDown}>
+    <li className="row note note--draft">
+      <form className="note-body note-form" onSubmit={submit} onKeyDown={onKeyDown}>
         <textarea
-          className="pins-note-text pins-note-input"
+          className="note-input note-input--text"
           aria-label="Note or quote"
           placeholder="A note or quote…"
           maxLength={280}
-          rows={2}
           autoFocus
           value={text}
           onChange={(event) => setText(event.target.value)}
         />
         <input
-          className="pins-note-by pins-note-input"
+          className="note-input"
           aria-label="Who said it (optional)"
           placeholder="— who said it (optional)"
           maxLength={80}
+          autoComplete="off"
           value={by}
           onChange={(event) => setBy(event.target.value)}
         />
-        <span className="pins-note-actions">
-          <button type="button" onClick={onClose}>
+        <span className="note-actions button-group">
+          <button type="button" className="text-button pressable" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" disabled={!text.trim()}>
-            Add
+          <button type="submit" className="text-button text-button--primary pressable" disabled={!text.trim()}>
+            Add note
           </button>
         </span>
       </form>
@@ -590,9 +468,19 @@ function NoteComposer({ onSave, onClose }: { onSave: (text: string, by: string) 
   );
 }
 
+const ERROR_COPY: Record<FeedErrorKind, string> = {
+  offline: 'Couldn’t reach the server. Check your connection.',
+  auth: 'The server didn’t accept the key. Check Settings.',
+  missing: 'This server doesn’t offer Pins.',
+  server: 'The server had a problem.',
+};
+
 interface PinsViewProps {
   items: PinItem[];
   failed: boolean;
+  errorKind?: FeedErrorKind | null;
+  settled?: boolean;
+  showSkeleton?: boolean;
   retrying: boolean;
   availability: PinsAvailability;
   unpin: (id: string) => void;
@@ -609,6 +497,9 @@ const noop = () => {};
 export function PinsView({
   items,
   failed,
+  errorKind = null,
+  settled = true,
+  showSkeleton = false,
   retrying,
   availability,
   unpin,
@@ -622,85 +513,113 @@ export function PinsView({
   const [composing, setComposing] = useState(false);
   const safe = items.filter((item) => safeDestinationUrl(item.url));
   const hasCards = safe.length > 0;
-  const hasRow = hasCards || notes.length > 0 || composing;
+  const hasNotes = notes.length > 0 || composing;
   const needsOnboarding = availability === 'needs-access' || availability === 'enabling';
-  const showOnboarding = !hasCards && needsOnboarding;
-  const isOpen = hasRow || failed || showOnboarding;
+  const isEmpty = !hasCards && !hasNotes && !failed;
 
   return (
-    <section className="pins" aria-label="Pins" aria-hidden={!isOpen} data-open={isOpen}>
-      <div className="pins-anim">
-        <div className="pins-clip">
-          {isOpen && (
-            <>
-              <div className="pins-head">
-                <h2 className="pins-title">Pins</h2>
+    <section className="block pins" aria-labelledby="pins-title">
+      <div className="block-head">
+        <h2 className="block-title" id="pins-title">
+          Pins
+        </h2>
+        <button
+          type="button"
+          className="text-button pressable"
+          onClick={() => setComposing(true)}
+          disabled={composing}
+        >
+          + Note
+        </button>
+      </div>
+      {hasNotes && (
+        <ul className="rows notes" aria-label="Notes">
+          {composing && <NoteComposer onSave={addNote} onClose={() => setComposing(false)} />}
+          {notes.map((note) => (
+            <NoteCard
+              key={note.id}
+              note={note}
+              onRemove={() => removeNote(note.id)}
+              onRecolor={(color) => recolorNote(note.id, color)}
+            />
+          ))}
+        </ul>
+      )}
+      {hasCards && (
+        <ul className="rows">
+          {safe.map((item) => {
+            const host = displayHost(item.url);
+            return (
+              <li key={item.id} className="row">
+                <a className="row-link pressable" href={item.url} title={`${item.title}\n${host}`}>
+                  <Thumb favicon={faviconUrl(item.url)} image={pinImage(item)} shape="wide" lazy />
+                  <span className="row-text">
+                    <span className="row-title row-title--clamp">{item.title}</span>
+                    <span className="row-meta">{host}</span>
+                  </span>
+                </a>
                 <button
                   type="button"
-                  className="pins-add"
-                  onClick={() => setComposing(true)}
-                  disabled={composing}
+                  className="row-action pressable"
+                  aria-label={`Unpin ${item.title}`}
+                  onClick={() => unpin(item.id)}
                 >
-                  + Note
+                  ×
                 </button>
-              </div>
-              {hasRow && (
-                <ul className="pins-row">
-                  {composing && <NoteComposer onSave={addNote} onClose={() => setComposing(false)} />}
-                  {notes.map((note, index) => (
-                    <NoteCard
-                      key={note.id}
-                      note={note}
-                      index={index}
-                      onRemove={() => removeNote(note.id)}
-                      onRecolor={(color) => recolorNote(note.id, color)}
-                    />
-                  ))}
-                  {safe.map((item, index) => {
-                    const style = { '--i': notes.length + index } as CSSProperties;
-                    return (
-                      <li key={item.id} className="pins-card" style={style}>
-                        <a className="pins-link" href={item.url} title={item.title}>
-                          <PinMediaPreview item={item} />
-                          <span className="pins-card-title">{item.title}</span>
-                        </a>
-                        <button
-                          type="button"
-                          className="pins-dismiss"
-                          aria-label={`Unpin ${item.title}`}
-                          onClick={() => unpin(item.id)}
-                        >
-                          ×
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-              {showOnboarding && (
-                <p className="pins-onboarding" role="status">
-                  <span>Pins is configured. Chrome needs access to that host.</span>
-                  <button type="button" onClick={enable} disabled={availability === 'enabling'}>
-                    {availability === 'enabling' ? 'Enabling…' : 'Enable Pins'}
-                  </button>
-                </p>
-              )}
-              {failed && (
-                <p className={`pins-error${hasCards ? ' pins-error--stale' : ''}`} role="status">
-                  <span>{hasCards ? 'Couldn’t refresh Pins.' : 'Pins couldn’t load.'}</span>
-                  <button type="button" onClick={retry} disabled={retrying}>
-                    {retrying ? 'Retrying…' : 'Retry'}
-                  </button>
-                </p>
-              )}
-            </>
-          )}
-        </div>
-      </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {availability === 'ready' && !hasCards && !settled && showSkeleton && (
+        <ul className="rows" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <li key={i} className="row row--skeleton">
+              <span className="thumb thumb--wide" />
+              <span className="skeleton-line" />
+            </li>
+          ))}
+        </ul>
+      )}
+      {!hasCards && needsOnboarding && (
+        <p className="block-note" role="status">
+          <span>Pins is configured. Chrome needs access to that host.</span>
+          <button
+            type="button"
+            className="text-button text-button--primary pressable"
+            onClick={enable}
+            disabled={availability === 'enabling'}
+          >
+            {availability === 'enabling' ? 'Enabling…' : 'Enable Pins'}
+          </button>
+        </p>
+      )}
+      {isEmpty && availability === 'ready' && settled && (
+        <p className="block-note">
+          Nothing pinned yet. Pin a page in <span translate="no">Garden</span>, or add a note.
+        </p>
+      )}
+      {isEmpty && availability === 'unconfigured' && (
+        <p className="block-note">Add a note or quote to keep it in view.</p>
+      )}
+      {failed && (
+        <p className="block-note block-note--error" role="status">
+          <span>
+            {hasCards ? 'Couldn’t refresh Pins.' : 'Pins couldn’t load.'}
+            {errorKind && ` ${ERROR_COPY[errorKind]}`}
+          </span>
+          <button type="button" className="text-button pressable" onClick={retry} disabled={retrying}>
+            {retrying ? 'Retrying…' : 'Retry'}
+          </button>
+        </p>
+      )}
     </section>
   );
 }
 
 export default function Pins() {
-  return <PinsView {...useFeedQueue()} {...useNotes()} />;
+  const queue = useFeedQueue();
+  const notes = useNotes();
+  const showSkeleton = useDelayedFlag(queue.availability === 'ready' && !queue.settled);
+  return <PinsView {...queue} {...notes} showSkeleton={showSkeleton} />;
 }
