@@ -10,7 +10,8 @@ import {
   type ReviewSnapshot,
 } from './feed';
 import type { GardenSource } from './garden-source';
-import { formatAge, useDelayedFlag } from './view-helpers';
+import ReviewMedia from './ReviewMedia';
+import { formatCompactAge, useDelayedFlag } from './view-helpers';
 
 /** Stale-while-revalidate: the cached list paints at once, the live one replaces it. */
 function useReview(config: FeedConfig) {
@@ -80,19 +81,33 @@ export function ReviewView({ reviewUrl, snapshot, error, loading, showSkeleton, 
       </div>
       {items.length > 0 && (
         <ul className="rows">
-          {items.map((item) => (
-            <li key={item.id} className="row">
-              <a className="row-link pressable" href={reviewUrl} title={item.summary ? `${item.title}\n${item.summary}` : item.title}>
-                <span className="row-text">
-                  <span className="row-title row-title--clamp">{item.title}</span>
-                  {item.summary && <span className="row-meta">{item.summary}</span>}
-                </span>
-                <time className="row-aside" dateTime={item.created_at} title={new Date(item.created_at).toLocaleString()}>
-                  {formatAge(item.created_at, now)}
-                </time>
-              </a>
-            </li>
-          ))}
+          {items.map((item) => {
+            // The post text leads; the author is the small label under it.
+            const text = item.summary ?? item.title;
+            const author = item.summary ? item.title : null;
+            return (
+              <li key={item.id} className="row">
+                <a
+                  className="row-link row-link--top pressable"
+                  href={reviewUrl}
+                  title={author ? `${text}\n${author}` : text}
+                >
+                  {item.media && <ReviewMedia key={item.media.url} media={item.media} />}
+                  <span className="row-text">
+                    <span className="row-title row-title--clamp3">{text}</span>
+                    {author && <span className="row-meta">{author}</span>}
+                  </span>
+                  <time
+                    className="row-aside"
+                    dateTime={item.created_at}
+                    title={new Date(item.created_at).toLocaleString()}
+                  >
+                    {formatCompactAge(item.created_at, now)}
+                  </time>
+                </a>
+              </li>
+            );
+          })}
         </ul>
       )}
       {items.length === 0 && !snapshot && !error && showSkeleton && (

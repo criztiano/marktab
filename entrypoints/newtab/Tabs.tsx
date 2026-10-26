@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import Thumb from './Thumb';
 import {
   TAB_LIMIT,
   closeTab,
@@ -137,7 +136,7 @@ export function TabsView({ availability, usages, enable, close, focus, expanded 
   const canToggle = ranked.length > TABS_COLLAPSED;
 
   return (
-    <section className="block tabs" data-open="true" aria-labelledby="tabs-title" aria-busy={usages === null}>
+    <section className="block block--compact tabs" data-open="true" aria-labelledby="tabs-title" aria-busy={usages === null}>
       <div className="block-head">
         <h2 className="block-title" id="tabs-title">
           Open tabs by memory
@@ -149,7 +148,7 @@ export function TabsView({ availability, usages, enable, close, focus, expanded 
         )}
       </div>
       {usages && ranked.length === 0 && <p className="block-note">No open web pages to measure.</p>}
-      <ol className="rows" id="tabs-list">
+      <ol className="rows rows--compact" id="tabs-list">
         {shown.map((usage) => {
           const style = { '--share': usage.bytes / heaviest } as CSSProperties;
           return (
@@ -160,7 +159,7 @@ export function TabsView({ availability, usages, enable, close, focus, expanded 
                 title={`${usage.title}\n${usage.url}`}
                 onClick={() => focus(usage)}
               >
-                <Thumb favicon={faviconUrl(usage.url)} shape="square" />
+                <img className="row-icon" src={faviconUrl(usage.url)} alt="" width={16} height={16} decoding="async" />
                 <span className="row-text">
                   <span className="row-title">{usage.title}</span>
                 </span>
@@ -188,7 +187,7 @@ export function TabsView({ availability, usages, enable, close, focus, expanded 
       {canToggle && (
         <button
           type="button"
-          className="text-button pressable tabs-toggle"
+          className="text-button text-button--small pressable tabs-toggle"
           aria-expanded={expanded}
           aria-controls="tabs-list"
           onClick={onToggle}
